@@ -40,6 +40,7 @@ void RpcProvider::NotifyService(google::protobuf::Service *service) {
 
 // 启动rpc服务节点，开始提供rpc远程网络调用服务
 void RpcProvider::Run(int nodeIndex, short port) {
+  /* 因为云服务器将hostname的ip设置为内网ip，所以ip先写死为"127.0.0.1"
   //获取可用ip
   char *ipC;
   char hname[128];
@@ -49,7 +50,8 @@ void RpcProvider::Run(int nodeIndex, short port) {
   for (int i = 0; hent->h_addr_list[i]; i++) {
     ipC = inet_ntoa(*(struct in_addr *)(hent->h_addr_list[i]));  // IP地址
   }
-  std::string ip = std::string(ipC);
+  */
+  std::string ip = std::string("127.0.0.1");
   //    // 获取端口
   //    if(getReleasePort(port)) //在port的基础上获取一个可用的port，不知道为何没有效果
   //    {
