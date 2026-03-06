@@ -1,24 +1,24 @@
 #ifndef RAFT_H
 #define RAFT_H
 
-#include <boost/serialization/string.hpp>
-#include <boost/serialization/vector.hpp>
-#include <chrono>
-#include <cmath>
-#include <iostream>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
-#include "ApplyMsg.h"
-#include "Persister.h"
-#include "boost/any.hpp"
-#include "boost/serialization/serialization.hpp"
-#include "config.h"
-#include "monsoon.h"
-#include "raftRpcUtil.h"
-#include "util.h"
+#include <boost/serialization/string.hpp>      // boost序列化支持string类型
+#include <boost/serialization/vector.hpp>      // boost序列化支持vector类型
+#include <chrono>                             // 时间相关，如超时、定时器
+#include <cmath>                              // 数学函数，如std::abs、std::pow等
+#include <iostream>                           // 标准输入输出流，调试打印等
+#include <memory>                             // 智能指针，如std::shared_ptr、std::unique_ptr
+#include <mutex>                              // 互斥锁std::mutex，多线程同步
+#include <string>                             // 字符串std::string
+#include <thread>                             // 多线程std::thread
+#include <vector>                             // 动态数组std::vector
+#include "ApplyMsg.h"                        // 日志应用消息结构体定义
+#include "Persister.h"                       // 持久化相关接口和实现
+#include "boost/any.hpp"                     // boost任意类型容器any
+#include "boost/serialization/serialization.hpp" // boost序列化主头文件
+#include "config.h"                          // 配置相关定义
+#include "monsoon.h"                         // 协程/IO管理器相关定义
+#include "raftRpcUtil.h"                     // raft RPC工具类
+#include "util.h"                            // 工具函数、通用辅助方法
 /// @brief //////////// 网络状态表示  todo：可以在rpc中删除该字段，实际生产中是用不到的.
 constexpr int Disconnected =
     0;  // 方便网络分区的时候debug，网络异常的时候为disconnected，只要网络正常就为AppNormal，防止matchIndex[]数组异常减小
@@ -33,20 +33,19 @@ constexpr int Normal = 3;
 
 class Raft : public raftRpcProctoc::raftRpc {
  private:
-  std::mutex m_mtx;
-  std::vector<std::shared_ptr<RaftRpcUtil>> m_peers;
-  std::shared_ptr<Persister> m_persister;
-  int m_me;
-  int m_currentTerm;
-  int m_votedFor;
+  std::mutex m_mtx;//互斥锁
+  std::vector<std::shared_ptr<RaftRpcUtil>> m_peers;//与集群中其他节点进行rpc的接口
+  std::shared_ptr<Persister> m_persister;//持久层，
+  int m_me;//用与标识该节点在集群中的逻辑编号
+  int m_currentTerm;//记录当前任期
+  int m_votedFor;//记录当前任期给谁投过票
   std::vector<raftRpcProctoc::LogEntry> m_logs;  //// 日志条目数组，包含了状态机要执行的指令集，以及收到领导时的任期号
                                                  // 这两个状态所有结点都在维护，易失
   int m_commitIndex;
   int m_lastApplied;  // 已经汇报给状态机（上层应用）的log 的index
 
-  // 这两个状态是由服务器来维护，易失
-  std::vector<int>
-      m_nextIndex;  // 这两个状态的下标1开始，因为通常commitIndex和lastApplied从0开始，应该是一个无效的index，因此下标从1开始
+  // 这两个状态是由服务器来维护，易失状态
+  std::vector<int> m_nextIndex;  // 这两个状态的下标1开始，因为通常commitIndex和lastApplied从0开始，应该是一个无效的index，因此下标从1开始
   std::vector<int> m_matchIndex;
   enum Status { Follower, Candidate, Leader };
   // 身份

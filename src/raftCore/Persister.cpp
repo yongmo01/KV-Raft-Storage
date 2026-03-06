@@ -47,7 +47,7 @@ long long Persister::RaftStateSize() {
 }
 
 std::string Persister::ReadRaftState() {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::lock_guard<std::mutex> lg(m_mtx);//函数构造时加锁，函数结束时自动解锁。当函数崩溃的时候，防止死锁，保证其他线程能够继续访问这个函数
 
   std::fstream ifs(m_raftStateFileName, std::ios_base::in);
   if (!ifs.good()) {

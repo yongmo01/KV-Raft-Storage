@@ -315,10 +315,11 @@ void Raft::electionTimeOutTicker() {
   while (true) {
     /**
      * 如果不睡眠，那么对于leader，这个函数会一直空转，浪费cpu。且加入协程之后，空转会导致其他协程无法运行，对于时间敏感的AE，会导致心跳无法正常发送导致异常
+     * Leader没必要检查选举超时
+     * 休眠用 HeartBeatTimeout 是一种折中：检查频率不太低（能较快发现身份变化），也不太高（不浪费资源）。
      */
     while (m_status == Leader) {
-      usleep(
-          HeartBeatTimeout);  //定时时间没有严谨设置，因为HeartBeatTimeout比选举超时一般小一个数量级，因此就设置为HeartBeatTimeout了
+      usleep(HeartBeatTimeout);  //定时时间没有严谨设置，因为HeartBeatTimeout比选举超时一般小一个数量级，因此就设置为HeartBeatTimeout了
     }
     std::chrono::duration<signed long int, std::ratio<1, 1000000000>> suitableSleepTime{};
     std::chrono::system_clock::time_point wakeTime{};
@@ -339,7 +340,7 @@ void Raft::electionTimeOutTicker() {
       // 获取函数运行结束后的时间点
       auto end = std::chrono::steady_clock::now();
 
-      // 计算时间差并输出结果（单位为毫秒）
+      // 计算时间差并输出结果（单位为毫秒） 计算实际睡眠时间，看看和预期睡眠时间的差距
       std::chrono::duration<double, std::milli> duration = end - start;
 
       // 使用ANSI控制序列将输出颜色修改为紫色
@@ -985,38 +986,47 @@ void Raft::Start(Op command, int* newLogIndex, int* newLogTerm, bool* isLeader) 
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+// 参数说明
+// peers[]：所有服务器的地址列表，包含自己在内;me：当前服务器在peers[]中的索引;persister：持久化对象，提供了保存和读取持久化状态的方法;applyCh：应用层的消息通道，Raft通过这个通道向应用层发送已经提交的日志条目。
 void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
                 std::shared_ptr<LockQueue<ApplyMsg>> applyCh) {
-  m_peers = peers;
-  m_persister = persister;
-  m_me = me;
+  m_peers = peers;//与其他结点沟通的rpc类
+  m_persister = persister;//持久化类
+  m_me = me;//标记自己，不能给自己发送rpc
   // Your initialization code here (2A, 2B, 2C).
   m_mtx.lock();
 
   // applier
-  this->applyChan = applyCh;
+  this->applyChan = applyCh;//与KV-server沟通
   //    rf.ApplyMsgQueue = make(chan ApplyMsg)
-  m_currentTerm = 0;
-  m_status = Follower;
-  m_commitIndex = 0;
-  m_lastApplied = 0;
+  m_currentTerm = 0;//任期初始化为0
+  m_status = Follower;//初始化身份为follower
+  m_commitIndex = 0;//初始化提交的的日志索引
+  m_lastApplied = 0;//初始化提交到状态机的日志
   m_logs.clear();
-  for (int i = 0; i < m_peers.size(); i++) {
-    m_matchIndex.push_back(0);
+  for (int i = 0; i < m_peers.size(); i++) {//根据节点个数初始化matchIndex和nextIndex
+    m_matchIndex.push_back(0); //表示没有日志条目已提交或已应用
     m_nextIndex.push_back(0);
   }
-  m_votedFor = -1;
+  m_votedFor = -1;//初始化为-1，表示没有投票
 
-  m_lastSnapshotIncludeIndex = 0;
-  m_lastSnapshotIncludeTerm = 0;
+  m_lastSnapshotIncludeIndex = 0;//
+  m_lastSnapshotIncludeTerm = 0;//
+  //初始化选举以及心跳定时器
   m_lastResetElectionTime = now();
   m_lastResetHearBeatTime = now();
 
   // initialize from state persisted before a crash
-  readPersist(m_persister->ReadRaftState());
+  readPersist(m_persister->ReadRaftState());//持久化存储中恢复 Raft 状态
+    //如果 m_lastSnapshotIncludeIndex 大于 0，则将 m_lastApplied 设置为该值。这是为了确保在崩溃后能够从快照中恢复状态
   if (m_lastSnapshotIncludeIndex > 0) {
     m_lastApplied = m_lastSnapshotIncludeIndex;
-    // rf.commitIndex = rf.lastSnapshotIncludeIndex   todo ：崩溃恢复为何不能读取commitIndex
+    // rf.commitIndex = rf.lastSnapshotIncludeIndex   
+    // 崩溃恢复为何不用读取commitIndex？
+    // 如果该节点是 Follower，Leader 会通过后续的 AppendEntries RPC 同步其 leaderCommit，从而帮助 Follower 更新其 m_commitIndex。
+    // 如果该节点竞选成为 Leader，它会通过统计大多数节点的 matchIndex 来重新计算并推进 commitIndex 。
+    // m_commitIndex 只是一个内存中的指针，表示“已知已提交”的范围，即便从 0 开始重新追赶也不会影响数据的一致性。
+    // commitIndex 在系统运行中会频繁更新（几乎每次日志达成多数派都会变）。如果将其持久化，意味着每次达成共识都要进行额外的磁盘 I/O 操作，这将极大地降低高并发场景下的性能。
   }
 
   DPrintf("[Init&ReInit] Sever %d, term %d, lastSnapshotIncludeIndex {%d} , lastSnapshotIncludeTerm {%d}", m_me,
@@ -1029,11 +1039,14 @@ void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::sh
   // start ticker fiber to start elections
   // 启动三个循环定时器
   // todo:原来是启动了三个线程，现在是直接使用了协程，三个函数中leaderHearBeatTicker
-  // 、electionTimeOutTicker执行时间是恒定的，applierTicker时间受到数据库响应延迟和两次apply之间请求数量的影响，这个随着数据量增多可能不太合理，最好其还是启用一个线程。
+  // electionTimeOutTicker执行时间是恒定的，applierTicker时间受到数据库响应延迟和两次apply之间请求数量的影响，这个随着数据量增多可能不太合理，最好其还是启用一个线程。
   m_ioManager->scheduler([this]() -> void { this->leaderHearBeatTicker(); });
-  m_ioManager->scheduler([this]() -> void { this->electionTimeOutTicker(); });
-
+  m_ioManager->scheduler([this]() -> void { this->electionTimeOutTicker(); });//把当前this raft类的成员函数传入到scheduler中，scheduler会在协程中调用这个函数
+  //这行代码创建了一个原生的系统级线程 t3。
+  //第一个参数 &Raft::applierTicker 是要执行的成员函数地址。
+  //第二个参数 this 是调用该函数的对象实例（因为成员函数需要 this 指针来运行）
   std::thread t3(&Raft::applierTicker, this);
+  //detach() 将新创建的线程从主控制流中分离，使其在后台独立运行。即使创建它的作用域结束，该线程也会继续执行，直到任务完成  
   t3.detach();
 
   // std::thread t(&Raft::leaderHearBeatTicker, this);
