@@ -39,8 +39,8 @@ class Raft : public raftRpcProctoc::raftRpc {
   int m_me;//用与标识该节点在集群中的逻辑编号
   int m_currentTerm;//记录当前任期
   int m_votedFor;//记录当前任期给谁投过票
-  std::vector<raftRpcProctoc::LogEntry> m_logs;  //// 日志条目数组，包含了状态机要执行的指令集，以及收到领导时的任期号
-                                                 // 这两个状态所有结点都在维护，易失
+  std::vector<raftRpcProctoc::LogEntry> m_logs;  // 日志条目数组，包含了状态机要执行的指令集，以及收到的心跳等信息，日志条目是从1开始的，0位置是一个无效的日志条目，方便处理一些边界情况
+  // 这两个状态所有结点都在维护，易失
   int m_commitIndex;
   int m_lastApplied;  // 已经汇报给状态机（上层应用）的log 的index
 
@@ -79,6 +79,7 @@ class Raft : public raftRpcProctoc::raftRpc {
   void doHeartBeat();
   // 每隔一段时间检查睡眠时间内有没有重置定时器，没有则说明超时了
   // 如果有则设置合适睡眠时间：睡眠到重置时间+超时时间
+  // Leader采用先小睡一会来减少CPU空转。总体是采用睡眠的方式，来定时的查看是否需要发起选举或者发送心跳，而不是时不时的检查一下。
   void electionTimeOutTicker();
   std::vector<ApplyMsg> getApplyLogs();
   int getNewCommandIndex();
