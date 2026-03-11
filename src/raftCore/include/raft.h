@@ -19,6 +19,7 @@
 #include "monsoon.h"                         // 协程/IO管理器相关定义
 #include "raftRpcUtil.h"                     // raft RPC工具类
 #include "util.h"                            // 工具函数、通用辅助方法
+#include "metrics.h"                         // 【扩展四】运行时监控指标
 /// @brief //////////// 网络状态表示  todo：可以在rpc中删除该字段，实际生产中是用不到的.
 constexpr int Disconnected =
     0;  // 方便网络分区的时候debug，网络异常的时候为disconnected，只要网络正常就为AppNormal，防止matchIndex[]数组异常减小
@@ -122,6 +123,33 @@ class Raft : public raftRpcProctoc::raftRpc {
   // 这个函数的目的是把安装到快照里的日志抛弃，并安装快照数据，同时更新快照下标，属于peers自身主动更新，与leader发送快照不冲突
   // 即服务层主动发起请求raft保存snapshot里面的数据，index是用来表示snapshot快照执行到了哪条命令
   void Snapshot(int index, std::string snapshot);
+
+  // ====================== 【扩展一】ReadIndex 读优化 ======================
+#if ENABLE_READ_INDEX
+  /**
+   * @brief ReadIndex读优化的核心方法
+   *
+   * 原理：Leader收到读请求时，不走日志复制（Start），而是：
+   *   1. 记录当前commitIndex作为readIndex
+   *   2. 向多数节点发送一轮心跳，确认自己仍是合法Leader
+   *   3. 等待lastApplied >= readIndex后，直接读取状态机
+   *
+   * 这避免了Get请求产生日志条目，大幅降低读延迟和IO开销。
+   * 参考：etcd/TiKV 的 ReadIndex 实现。
+   *
+   * @param readIndex [out] 返回当前的commitIndex作为读取的安全点
+   * @return true: 当前节点是Leader且已确认Leadership; false: 不是Leader
+   */
+  bool ReadIndex(int *readIndex);
+
+  /**
+   * @brief 等待lastApplied追上指定的readIndex
+   * @param readIndex 需要等待追上的日志索引
+   * @param timeoutMs 超时时间（毫秒）
+   * @return true: lastApplied已追上readIndex; false: 超时
+   */
+  bool WaitForApplied(int readIndex, int timeoutMs);
+#endif
 
  public:
   // 重写基类方法,因为rpc远程调用真正调用的是这个方法

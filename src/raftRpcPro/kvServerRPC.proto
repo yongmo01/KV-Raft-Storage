@@ -32,6 +32,9 @@ message PutAppendArgs  {
   // otherwise RPC will break.
   bytes  ClientId = 4;
   int32  RequestId = 5;
+  // 【扩展二】TTL过期时间（毫秒），0表示永不过期
+  // 当ENABLE_KEY_TTL开启时，该字段才有实际意义
+  int64  TtlMs = 6;
 }
 
 message PutAppendReply  {

@@ -21,6 +21,8 @@
 #include "kvServerRPC.pb.h"
 #include "raft.h"
 #include "skipList.h"
+#include "config.h"
+#include "metrics.h"
 
 class KvServer : raftKVRpcProctoc::kvServerRpc {
  private:
@@ -42,6 +44,12 @@ class KvServer : raftKVRpcProctoc::kvServerRpc {
 
   // last SnapShot point , raftIndex
   int m_lastSnapShotRaftLogIndex;
+
+  // ====================== 【扩展二】TTL 过期管理 ======================
+#if ENABLE_KEY_TTL
+  // key -> 过期时间戳(绝对时间，毫秒)。如果key不在此map中，则表示永不过期。
+  std::unordered_map<std::string, uint64_t> m_expireMap;
+#endif
 
  public:
   KvServer() = delete;
@@ -86,6 +94,37 @@ class KvServer : raftKVRpcProctoc::kvServerRpc {
   void GetSnapShotFromRaft(ApplyMsg message);
 
   std::string MakeSnapShot();
+
+  // ====================== 【扩展二】TTL 管理方法 ======================
+#if ENABLE_KEY_TTL
+  /**
+   * @brief 检查指定key是否已过期（惰性删除策略的核心）
+   * @param key 要检查的key
+   * @return true表示已过期，false表示未过期或无TTL设置
+   */
+  bool isKeyExpired(const std::string &key);
+
+  /**
+   * @brief 设置key的过期时间
+   * @param key 要设置的key
+   * @param ttlMs 过期时间（毫秒），0表示永不过期
+   */
+  void setKeyExpire(const std::string &key, int64_t ttlMs);
+
+  /**
+   * @brief 定期清理过期key的后台线程函数（定期删除策略）
+   * 每隔TTL_CLEANUP_INTERVAL_MS毫秒，随机抽样TTL_CLEANUP_SAMPLE_COUNT个key进行检查
+   */
+  void activeExpireCycle();
+#endif
+
+  // ====================== 【扩展四】Metrics 日志输出 ======================
+#if ENABLE_METRICS
+  /**
+   * @brief 定期输出Metrics指标到日志的后台线程函数
+   */
+  void metricsDumpLoop();
+#endif
 
  public:  // for rpc
   void PutAppend(google::protobuf::RpcController *controller, const ::raftKVRpcProctoc::PutAppendArgs *request,

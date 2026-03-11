@@ -120,6 +120,14 @@ class LockQueue {
 // lock()、unlock()、try_lock() 等方法手动控制锁的状态。当然，std::unique_lock 也支持 RAII
 // 技术，即在对象被销毁时会自动解锁。另外， std::unique_lock 还支持超时等待和可中断等待的操作。
 
+/// @brief 获取当前时间戳（毫秒），用于TTL过期判断
+inline uint64_t getCurrentTimeMs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
 // 这个Op是kv传递给raft的command
 class Op {
  public:
@@ -132,6 +140,8 @@ class Op {
   std::string ClientId;  //客户端号码
   int RequestId;         //客户端号码请求的Request的序列号，为了保证线性一致性
                          // IfDuplicate bool // Duplicate command can't be applied twice , but only for PUT and APPEND
+  // 【扩展二】TTL过期时间（毫秒），0表示永不过期
+  int64_t TtlMs = 0;
 
  public:
   // todo
@@ -172,6 +182,7 @@ class Op {
     ar& Value;
     ar& ClientId;
     ar& RequestId;
+    ar& TtlMs;  // 【扩展二】序列化TTL字段，确保TTL信息能通过Raft日志正确传递
   }
 };
 

@@ -15,6 +15,8 @@
 #include <vector>
 #include "kvServerRPC.pb.h"
 #include "mprpcconfig.h"
+#include "config.h"
+
 class Clerk {
  private:
   std::vector<std::shared_ptr<raftServerRpcUtil>>
@@ -30,6 +32,11 @@ class Clerk {
   //    MakeClerk  todo
   void PutAppend(std::string key, std::string value, std::string op);
 
+  // 【扩展二】支持TTL的PutAppend内部方法
+#if ENABLE_KEY_TTL
+  void PutAppendWithTTL(std::string key, std::string value, std::string op, int64_t ttlMs);
+#endif
+
  public:
   //对外暴露的三个功能和初始化
   void Init(std::string configFileName);
@@ -37,6 +44,12 @@ class Clerk {
 
   void Put(std::string key, std::string value);
   void Append(std::string key, std::string value);
+
+  // 【扩展二】支持TTL的Put和Append接口，ttlMs为过期时间（毫秒），0表示永不过期
+#if ENABLE_KEY_TTL
+  void PutWithTTL(std::string key, std::string value, int64_t ttlMs);
+  void AppendWithTTL(std::string key, std::string value, int64_t ttlMs);
+#endif
 
  public:
   Clerk();

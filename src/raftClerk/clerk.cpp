@@ -74,6 +74,49 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op) {
 void Clerk::Put(std::string key, std::string value) { PutAppend(key, value, "Put"); }
 
 void Clerk::Append(std::string key, std::string value) { PutAppend(key, value, "Append"); }
+
+// ====================== 【扩展二】Key TTL —— 客户端侧支持 ======================
+#if ENABLE_KEY_TTL
+/**
+ * @brief 带TTL的PutAppend内部实现
+ * @param ttlMs 过期时间（毫秒），0表示永不过期
+ *
+ * 与普通PutAppend的唯一区别：在RPC参数中设置 ttlms 字段，
+ * KvServer端收到后会将此TTL与Key关联，到期自动删除。
+ */
+void Clerk::PutAppendWithTTL(std::string key, std::string value, std::string op, int64_t ttlMs) {
+  m_requestId++;
+  auto requestId = m_requestId;
+  auto server = m_recentLeaderId;
+  while (true) {
+    raftKVRpcProctoc::PutAppendArgs args;
+    args.set_key(key);
+    args.set_value(value);
+    args.set_op(op);
+    args.set_clientid(m_clientId);
+    args.set_requestid(requestId);
+    args.set_ttlms(ttlMs);  // 设置TTL
+    raftKVRpcProctoc::PutAppendReply reply;
+    bool ok = m_servers[server]->PutAppend(&args, &reply);
+    if (!ok || reply.err() == ErrWrongLeader) {
+      server = (server + 1) % m_servers.size();
+      continue;
+    }
+    if (reply.err() == OK) {
+      m_recentLeaderId = server;
+      return;
+    }
+  }
+}
+
+void Clerk::PutWithTTL(std::string key, std::string value, int64_t ttlMs) {
+  PutAppendWithTTL(key, value, "Put", ttlMs);
+}
+
+void Clerk::AppendWithTTL(std::string key, std::string value, int64_t ttlMs) {
+  PutAppendWithTTL(key, value, "Append", ttlMs);
+}
+#endif  // ENABLE_KEY_TTL
 //初始化客户端
 void Clerk::Init(std::string configFileName) {
   //获取所有raft节点ip、port ，并进行连接

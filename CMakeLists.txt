@@ -2,9 +2,31 @@
 cmake_minimum_required(VERSION 3.22)
 project(KVRaftCpp)
 
+# ====================== 【扩展功能开关】 ======================
+# 每个扩展均可通过cmake命令行独立开关，例如：
+#   cmake -DENABLE_READ_INDEX=OFF ..    关闭ReadIndex读优化
+#   cmake -DENABLE_KEY_TTL=OFF ..       关闭Key TTL过期机制
+#   cmake -DENABLE_THREAD_POOL=OFF ..   关闭RPC业务线程池
+#   cmake -DENABLE_METRICS=OFF ..       关闭运行时监控指标
+# 默认全部开启
+option(ENABLE_READ_INDEX   "启用ReadIndex读优化"        ON)
+option(ENABLE_KEY_TTL      "启用Key TTL过期删除机制"     ON)
+option(ENABLE_THREAD_POOL  "启用RPC业务线程池"           ON)
+option(ENABLE_METRICS      "启用运行时监控指标"           ON)
 
-
-
+# 将开关状态传递给编译器（覆盖config.h中的默认值）
+if(NOT ENABLE_READ_INDEX)
+  add_compile_definitions(ENABLE_READ_INDEX=0)
+endif()
+if(NOT ENABLE_KEY_TTL)
+  add_compile_definitions(ENABLE_KEY_TTL=0)
+endif()
+if(NOT ENABLE_THREAD_POOL)
+  add_compile_definitions(ENABLE_THREAD_POOL=0)
+endif()
+if(NOT ENABLE_METRICS)
+  add_compile_definitions(ENABLE_METRICS=0)
+endif()
 
 
 set(CMAKE_CXX_STANDARD 20)

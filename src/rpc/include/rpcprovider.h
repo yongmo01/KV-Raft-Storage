@@ -8,6 +8,12 @@
 #include <string>
 #include <unordered_map>
 #include "google/protobuf/service.h"
+#include "config.h"
+
+// 【扩展三】线程池：将RPC业务处理卸载到独立线程池，避免阻塞Muduo IO线程
+#if ENABLE_THREAD_POOL
+#include "threadPool.h"
+#endif
 
 // 框架提供的专门发布rpc服务的网络对象类
 // todo:现在rpc客户端变成了 长连接，因此rpc服务器这边最好提供一个定时器，用以断开很久没有请求的连接。
@@ -32,6 +38,11 @@ class RpcProvider {
   };
   // 存储注册成功的服务对象和其服务方法的所有信息
   std::unordered_map<std::string, ServiceInfo> m_serviceMap;
+
+  // 【扩展三】业务线程池，用于异步执行RPC业务逻辑，避免阻塞Muduo的IO线程
+#if ENABLE_THREAD_POOL
+  ThreadPool m_businessThreadPool{THREAD_POOL_SIZE};
+#endif
 
   // 新的socket连接回调
   void OnConnection(const muduo::net::TcpConnectionPtr &);

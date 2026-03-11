@@ -763,6 +763,7 @@ void PutAppendArgs::Clear() {
   op_.ClearToEmpty(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   clientid_.ClearToEmpty(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   requestid_ = 0;
+  ttlms_ = PROTOBUF_LONGLONG(0);
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
@@ -810,6 +811,13 @@ const char* PutAppendArgs::_InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_
       case 5:
         if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 40)) {
           requestid_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
+          CHK_(ptr);
+        } else goto handle_unusual;
+        continue;
+      // int64 TtlMs = 6;
+      case 6:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 48)) {
+          ttlms_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
           CHK_(ptr);
         } else goto handle_unusual;
         continue;
@@ -871,6 +879,12 @@ failure:
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteInt32ToArray(5, this->_internal_requestid(), target);
   }
 
+  // int64 TtlMs = 6;
+  if (this->ttlms() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteInt64ToArray(6, this->_internal_ttlms(), target);
+  }
+
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormat::InternalSerializeUnknownFieldsToArray(
         _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
@@ -922,6 +936,13 @@ size_t PutAppendArgs::ByteSizeLong() const {
         this->_internal_requestid());
   }
 
+  // int64 TtlMs = 6;
+  if (this->ttlms() != 0) {
+    total_size += 1 +
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::Int64Size(
+        this->_internal_ttlms());
+  }
+
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
     return ::PROTOBUF_NAMESPACE_ID::internal::ComputeUnknownFieldsSize(
         _internal_metadata_, total_size, &_cached_size_);
@@ -968,6 +989,9 @@ void PutAppendArgs::MergeFrom(const PutAppendArgs& from) {
   if (from.requestid() != 0) {
     _internal_set_requestid(from._internal_requestid());
   }
+  if (from.ttlms() != 0) {
+    _internal_set_ttlms(from._internal_ttlms());
+  }
 }
 
 void PutAppendArgs::CopyFrom(const ::PROTOBUF_NAMESPACE_ID::Message& from) {
@@ -996,6 +1020,7 @@ void PutAppendArgs::InternalSwap(PutAppendArgs* other) {
   op_.Swap(&other->op_, &::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   clientid_.Swap(&other->clientid_, &::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   swap(requestid_, other->requestid_);
+  swap(ttlms_, other->ttlms_);
 }
 
 ::PROTOBUF_NAMESPACE_ID::Metadata PutAppendArgs::GetMetadata() const {

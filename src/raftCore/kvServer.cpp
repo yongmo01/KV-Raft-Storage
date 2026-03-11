@@ -3,6 +3,8 @@
 #include <rpcprovider.h>
 
 #include "mprpcconfig.h"
+#include "config.h"
+#include "metrics.h"
 
 void KvServer::DprintfKVDB() {
   if (!Debug) {
@@ -25,16 +27,16 @@ void KvServer::ExecuteAppendOpOnKVDB(Op op) {
 
   m_skipList.insert_set_element(op.Key, op.Value);
 
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     m_kvDB[op.Key] = m_kvDB[op.Key] + op.Value;
-  // } else {
-  //     m_kvDB.insert(std::make_pair(op.Key, op.Value));
-  // }
+  // 【扩展二】TTL: 如果Op携带了TTL，设置key的过期时间
+#if ENABLE_KEY_TTL
+  if (op.TtlMs > 0) {
+    m_expireMap[op.Key] = getCurrentTimeMs() + static_cast<uint64_t>(op.TtlMs);
+  }
+#endif
+
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExeAPPEND-----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
   DprintfKVDB();
 }
 
@@ -42,41 +44,63 @@ void KvServer::ExecuteGetOpOnKVDB(Op op, std::string *value, bool *exist) {
   m_mtx.lock();
   *value = "";
   *exist = false;
+
+  // 【扩展二】TTL: 惰性删除——读取时检查key是否已过期
+#if ENABLE_KEY_TTL
+  if (isKeyExpired(op.Key)) {
+    // key已过期，执行惰性删除
+    m_skipList.delete_element(op.Key);
+    m_expireMap.erase(op.Key);
+    DPrintf("[KvServer::ExecuteGetOpOnKVDB] Key {%s} expired, lazy deleted", op.Key.c_str());
+    m_lastRequestId[op.ClientId] = op.RequestId;
+    m_mtx.unlock();
+    DprintfKVDB();
+    return;
+  }
+#endif
+
   if (m_skipList.search_element(op.Key, *value)) {
     *exist = true;
-    // *value = m_skipList.se //value已经完成赋值了
   }
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     *exist = true;
-  //     *value = m_kvDB[op.Key];
-  // }
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  if (*exist) {
-    //                DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, value :%v", op.ClientId,
-    //                op.RequestId, op.Key, value)
-  } else {
-    //        DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, But No KEY!!!!", op.ClientId,
-    //        op.RequestId, op.Key)
-  }
   DprintfKVDB();
 }
 
 void KvServer::ExecutePutOpOnKVDB(Op op) {
   m_mtx.lock();
   m_skipList.insert_set_element(op.Key, op.Value);
-  // m_kvDB[op.Key] = op.Value;
+
+  // 【扩展二】TTL: 如果Op携带了TTL，设置key的过期时间
+#if ENABLE_KEY_TTL
+  if (op.TtlMs > 0) {
+    m_expireMap[op.Key] = getCurrentTimeMs() + static_cast<uint64_t>(op.TtlMs);
+  } else {
+    // TTL为0表示永不过期，如果之前有设置过期时间则清除
+    m_expireMap.erase(op.Key);
+  }
+#endif
+
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExePUT----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
   DprintfKVDB();
 }
 
 // 处理来自clerk的Get RPC
 void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetReply *reply) {
+  // 【扩展四】Metrics: 记录Get请求计数和延迟
+#if ENABLE_METRICS
+  METRICS_INC_COUNTER("kv_get_total");
+  auto metricsStart = std::chrono::high_resolution_clock::now();
+  DEFER {
+    auto metricsEnd = std::chrono::high_resolution_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(metricsEnd - metricsStart).count();
+    METRICS_RECORD_LATENCY("kv_get_latency_us", us);
+  };
+#endif
+
   Op op;
   op.Operation = "Get";
   op.Key = args->key();
@@ -84,12 +108,41 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetR
   op.ClientId = args->clientid();
   op.RequestId = args->requestid();
 
+  // ====================== 【扩展一】ReadIndex 快速读路径 ======================
+  // 当ENABLE_READ_INDEX开启时，Get请求不走日志复制流程，
+  // 而是通过ReadIndex确认Leadership后直接读取状态机，大幅降低读延迟。
+#if ENABLE_READ_INDEX
+  int readIndex = -1;
+  if (m_raftNode->ReadIndex(&readIndex)) {
+    // ReadIndex成功：当前节点是Leader，readIndex是安全的读取点
+    // 等待状态机追上readIndex
+    if (m_raftNode->WaitForApplied(readIndex, CONSENSUS_TIMEOUT)) {
+      std::string value;
+      bool exist = false;
+      ExecuteGetOpOnKVDB(op, &value, &exist);
+      if (exist) {
+        reply->set_err(OK);
+        reply->set_value(value);
+      } else {
+        reply->set_err(ErrNoKey);
+        reply->set_value("");
+      }
+      DPrintf("[KvServer::Get-ReadIndex] kvserver{%d} ReadIndex成功, readIndex=%d, key=%s",
+              m_me, readIndex, op.Key.c_str());
+      return;
+    }
+    // WaitForApplied超时，降级到原有路径
+    DPrintf("[KvServer::Get-ReadIndex] kvserver{%d} WaitForApplied超时, 降级到日志复制路径", m_me);
+  }
+  // ReadIndex失败（不是Leader），走下面的日志复制路径
+#endif
+  // ====================== 原有日志复制路径 ======================
+
   int raftIndex = -1;
   int _ = -1;
   bool isLeader = false;
   m_raftNode->Start(op, &raftIndex, &_,
-                    &isLeader);  // raftIndex：raft预计的logIndex
-                                 // ，虽然是预计，但是正确情况下是准确的，op的具体内容对raft来说 是隔离的
+                    &isLeader);
 
   if (!isLeader) {
     reply->set_err(ErrWrongLeader);
@@ -210,12 +263,29 @@ bool KvServer::ifRequestDuplicate(std::string ClientId, int RequestId) {
 // PutAppend在收到raft消息之後執行，具體函數裏面只判斷冪等性（是否重複）
 // get函數收到raft消息之後在，因爲get無論是否重複都可以再執行
 void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs *args, raftKVRpcProctoc::PutAppendReply *reply) {
+  // 【扩展四】Metrics: 记录PutAppend请求计数和延迟
+#if ENABLE_METRICS
+  METRICS_INC_COUNTER("kv_putappend_total");
+  auto metricsStart = std::chrono::high_resolution_clock::now();
+  DEFER {
+    auto metricsEnd = std::chrono::high_resolution_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(metricsEnd - metricsStart).count();
+    METRICS_RECORD_LATENCY("kv_putappend_latency_us", us);
+  };
+#endif
+
   Op op;
   op.Operation = args->op();
   op.Key = args->key();
   op.Value = args->value();
   op.ClientId = args->clientid();
   op.RequestId = args->requestid();
+
+  // 【扩展二】TTL: 从RPC参数中提取TTL信息
+#if ENABLE_KEY_TTL
+  op.TtlMs = args->ttlms();
+#endif
+
   int raftIndex = -1;
   int _ = -1;
   bool isleader = false;
@@ -445,6 +515,83 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   if (!snapshot.empty()) {
     ReadSnapShotToInstall(snapshot);
   }
+
+  // 【扩展二】TTL: 启动定期清理过期key的后台线程
+#if ENABLE_KEY_TTL
+  std::thread ttlThread(&KvServer::activeExpireCycle, this);
+  ttlThread.detach();
+  DPrintf("[KvServer] kvserver{%d} TTL activeExpireCycle thread started", m_me);
+#endif
+
+  // 【扩展四】Metrics: 启动定期输出指标的后台线程
+#if ENABLE_METRICS
+  std::thread metricsThread(&KvServer::metricsDumpLoop, this);
+  metricsThread.detach();
+  DPrintf("[KvServer] kvserver{%d} Metrics dump thread started", m_me);
+#endif
+
   std::thread t2(&KvServer::ReadRaftApplyCommandLoop, this);  //马上向其他节点宣告自己就是leader
   t2.join();  //由於ReadRaftApplyCommandLoop一直不會結束，达到一直卡在这的目的
 }
+
+// ====================== 【扩展二】TTL 过期管理方法实现 ======================
+#if ENABLE_KEY_TTL
+
+bool KvServer::isKeyExpired(const std::string &key) {
+  // 注意：调用此函数时应持有m_mtx锁
+  auto it = m_expireMap.find(key);
+  if (it == m_expireMap.end()) {
+    return false;  // 没有设置过期时间，永不过期
+  }
+  return getCurrentTimeMs() > it->second;
+}
+
+void KvServer::setKeyExpire(const std::string &key, int64_t ttlMs) {
+  // 注意：调用此函数时应持有m_mtx锁
+  if (ttlMs > 0) {
+    m_expireMap[key] = getCurrentTimeMs() + static_cast<uint64_t>(ttlMs);
+  } else {
+    m_expireMap.erase(key);  // TTL为0，移除过期时间
+  }
+}
+
+void KvServer::activeExpireCycle() {
+  // 定期删除策略（类似Redis的activeExpireCycle）
+  // 每隔一段时间，随机抽样一部分key检查是否过期，过期则删除。
+  // 与惰性删除（读时检查）配合，确保过期key能被及时回收。
+  while (true) {
+    sleepNMilliseconds(TTL_CLEANUP_INTERVAL_MS);
+    std::lock_guard<std::mutex> lg(m_mtx);
+    int sampled = 0;
+    int expired = 0;
+    for (auto it = m_expireMap.begin(); it != m_expireMap.end() && sampled < TTL_CLEANUP_SAMPLE_COUNT;) {
+      sampled++;
+      if (getCurrentTimeMs() > it->second) {
+        // key已过期，从skipList和expireMap中删除
+        m_skipList.delete_element(it->first);
+        DPrintf("[TTL-activeExpireCycle] kvserver{%d} expired key: %s", m_me, it->first.c_str());
+        it = m_expireMap.erase(it);
+        expired++;
+      } else {
+        ++it;
+      }
+    }
+    if (expired > 0) {
+      DPrintf("[TTL-activeExpireCycle] kvserver{%d} cleaned %d expired keys", m_me, expired);
+    }
+  }
+}
+#endif  // ENABLE_KEY_TTL
+
+// ====================== 【扩展四】Metrics 日志输出方法实现 ======================
+#if ENABLE_METRICS
+void KvServer::metricsDumpLoop() {
+  // 定期将Metrics指标输出到日志，便于运行时观测系统状态
+  while (true) {
+    sleepNMilliseconds(METRICS_DUMP_INTERVAL_MS);
+    std::string metricsStr = METRICS_DUMP();
+    // 输出到标准输出（和DPrintf保持一致）
+    std::cout << "\n[kvserver{" << m_me << "}] " << metricsStr << std::endl;
+  }
+}
+#endif  // ENABLE_METRICS

@@ -4,6 +4,7 @@
 #include <memory>
 #include "config.h"
 #include "util.h"
+#include "metrics.h"
 
 void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpcProctoc::AppendEntriesReply* reply) {
   std::lock_guard<std::mutex> locker(m_mtx);
@@ -208,6 +209,8 @@ void Raft::doElection() {
 
   if (m_status != Leader) {
     DPrintf("[       ticker-func-rf(%d)              ]  选举定时器到期且不是leader，开始选举 \n", m_me);
+    // 【扩展四】记录选举发起次数
+    METRICS_INC_COUNTER("raft_election_started");
     //当选举的时候定时器超时就必须重新选举，不然没有选票就会一直卡主
     //重竞选超时，term也会增加的
     m_status = Candidate;
@@ -306,6 +309,12 @@ void Raft::doHeartBeat() {
       t.detach();
     }
     m_lastResetHearBeatTime = now();  // leader发送心跳，就不是随机时间了
+
+    // 【扩展四】在每次心跳时更新Raft核心状态的Gauge指标
+    METRICS_SET_GAUGE("raft_current_term", m_currentTerm);
+    METRICS_SET_GAUGE("raft_commit_index", m_commitIndex);
+    METRICS_SET_GAUGE("raft_last_applied", m_lastApplied);
+    METRICS_SET_GAUGE("raft_log_size", static_cast<int64_t>(m_logs.size()));
   }
 }
 
@@ -810,6 +819,8 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
     }
     //	第一次变成leader，初始化状态和nextIndex、matchIndex
     m_status = Leader;
+    // 【扩展四】记录选举成功事件
+    METRICS_INC_COUNTER("raft_election_won");
 
     DPrintf("[func-sendRequestVote rf{%d}] elect success  ,current term:{%d} ,lastLogIndex:{%d}\n", m_me, m_currentTerm,
             getLastLogIndex());
@@ -830,6 +841,8 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
 bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendEntriesArgs> args,
                              std::shared_ptr<raftRpcProctoc::AppendEntriesReply> reply,
                              std::shared_ptr<int> appendNums) {
+  // 【扩展四】追踪AppendEntries RPC延迟
+  METRICS_TIMER("raft_append_entries_latency_us");
   // 如果网络不通的话肯定是没有返回的，不用一直重试
   // todo： paper中5.3节第一段末尾提到，如果append失败应该不断的retries ,直到这个log成功的被store
   DPrintf("[func-Raft::sendAppendEntries-raft{%d}] leader 向节点{%d}发送AE rpc開始 ， args->entries_size():{%d}", m_me,
@@ -1134,3 +1147,145 @@ void Raft::Snapshot(int index, std::string snapshot) {
            format("len(rf.logs){%d} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
                   m_lastSnapshotIncludeIndex, lastLogIndex));
 }
+
+// ====================== 【扩展一】ReadIndex 读优化 ======================
+#if ENABLE_READ_INDEX
+/**
+ * @brief ReadIndex 读优化实现
+ *
+ * 工作流程：
+ *   1. 加锁，检查当前节点是否是Leader
+ *   2. 记录当前 commitIndex 作为 readIndex
+ *   3. 向所有Follower发起一轮心跳RPC（空AppendEntries）
+ *   4. 等待多数派确认后返回 readIndex
+ *
+ * 这样可以避免Get请求走日志复制流程，显著降低读延迟。
+ * 如果Leader在心跳确认期间失去了Leadership（term变化），则返回false。
+ */
+bool Raft::ReadIndex(int *readIndex) {
+  // --- 第一步：加锁并检查Leader身份，记录readIndex ---
+  m_mtx.lock();
+  if (m_status != Leader) {
+    m_mtx.unlock();
+    return false;
+  }
+
+  int savedTerm = m_currentTerm;
+  *readIndex = m_commitIndex;
+  int peersCount = static_cast<int>(m_peers.size());
+  m_mtx.unlock();
+
+  // --- 第二步：发起一轮心跳确认Leadership ---
+  // 使用 atomic 计数器统计成功确认的节点数（包含自身）
+  auto confirmCount = std::make_shared<std::atomic<int>>(1);  // Leader自身算一票
+  auto finished = std::make_shared<std::atomic<int>>(0);      // 已完成的RPC数
+
+  for (int i = 0; i < peersCount; i++) {
+    if (i == m_me) {
+      continue;
+    }
+
+    // 对每个Follower发起一个空的AppendEntries（心跳）
+    std::thread([this, i, savedTerm, confirmCount, finished, peersCount]() {
+      // 构造最小化的心跳请求
+      raftRpcProctoc::AppendEntriesArgs args;
+      raftRpcProctoc::AppendEntriesReply reply;
+
+      {
+        std::lock_guard<std::mutex> lg(m_mtx);
+        // 检查term是否发生变化或自己不再是Leader
+        if (m_currentTerm != savedTerm || m_status != Leader) {
+          finished->fetch_add(1);
+          return;
+        }
+        // 构造心跳参数
+        args.set_term(m_currentTerm);
+        args.set_leaderid(m_me);
+        // 心跳不携带日志条目，只需要PrevLogIndex/Term 和 LeaderCommit
+        int preLogIndex = -1;
+        int preTerm = -1;
+        getPrevLogInfo(i, &preLogIndex, &preTerm);
+        args.set_prevlogindex(preLogIndex);
+        args.set_prevlogterm(preTerm);
+        args.clear_entries();
+        args.set_leadercommit(m_commitIndex);
+      }
+
+      // 发送RPC（不持锁）
+      bool ok = m_peers[i]->AppendEntries(&args, &reply);
+
+      if (ok && reply.appstate() != Disconnected && reply.success()) {
+        confirmCount->fetch_add(1);
+      }
+      finished->fetch_add(1);
+    }).detach();
+  }
+
+  // --- 第三步：等待多数派确认或超时 ---
+  auto start = std::chrono::steady_clock::now();
+  int majority = peersCount / 2 + 1;
+
+  while (true) {
+    if (confirmCount->load() >= majority) {
+      // 多数派已确认，Leadership有效
+      // 最终再次检查term是否一致
+      std::lock_guard<std::mutex> lg(m_mtx);
+      if (m_currentTerm != savedTerm || m_status != Leader) {
+        return false;
+      }
+      DPrintf("[ReadIndex-rf{%d}] ReadIndex成功, readIndex=%d, 确认数=%d", m_me, *readIndex, confirmCount->load());
+      return true;
+    }
+
+    // 所有RPC都完成了但未达到多数派
+    if (finished->load() >= peersCount - 1) {
+      DPrintf("[ReadIndex-rf{%d}] ReadIndex失败, 确认数=%d 不足多数派", m_me, confirmCount->load());
+      return false;
+    }
+
+    // 超时检测（使用 CONSENSUS_TIMEOUT 作为上限）
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    if (elapsed > CONSENSUS_TIMEOUT) {
+      DPrintf("[ReadIndex-rf{%d}] ReadIndex超时, 已等待%ldms", m_me, elapsed);
+      return false;
+    }
+
+    // 短暂睡眠避免busy-wait，1ms粒度
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+/**
+ * @brief 等待状态机的 lastApplied 追上指定的 readIndex
+ *
+ * 在ReadIndex确认Leadership后，需要等待状态机将日志应用到readIndex位置，
+ * 才能保证读到的数据是最新的。
+ *
+ * @param readIndex 需要等待追上的日志索引（由ReadIndex方法返回）
+ * @param timeoutMs 超时时间（毫秒）
+ * @return true: lastApplied >= readIndex; false: 等待超时
+ */
+bool Raft::WaitForApplied(int readIndex, int timeoutMs) {
+  auto start = std::chrono::steady_clock::now();
+
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lg(m_mtx);
+      if (m_lastApplied >= readIndex) {
+        return true;
+      }
+    }
+    // 超时检测
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    if (elapsed > timeoutMs) {
+      DPrintf("[WaitForApplied-rf{%d}] 等待超时, readIndex=%d, lastApplied=%d",
+              m_me, readIndex, m_lastApplied);
+      return false;
+    }
+    // 短暂睡眠，等待applier协程推进lastApplied
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+#endif  // ENABLE_READ_INDEX

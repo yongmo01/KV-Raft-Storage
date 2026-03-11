@@ -233,7 +233,15 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   真的是妙呀
   */
   //真正调用方法
+  // 【扩展三】如果启用了线程池，将业务处理卸载到线程池中执行
+  //          这样Muduo的IO线程只负责网络收发，不会被耗时的业务逻辑阻塞
+#if ENABLE_THREAD_POOL
+  m_businessThreadPool.enqueue([service, method, request, response, done]() {
+    service->CallMethod(method, nullptr, request, response, done);
+  });
+#else
   service->CallMethod(method, nullptr, request, response, done);
+#endif
 }
 
 // Closure的回调操作，用于序列化rpc的响应和网络发送,发送响应回去

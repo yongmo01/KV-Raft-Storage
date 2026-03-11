@@ -568,6 +568,7 @@ class PutAppendArgs PROTOBUF_FINAL :
     kOpFieldNumber = 3,
     kClientIdFieldNumber = 4,
     kRequestIdFieldNumber = 5,
+    kTtlMsFieldNumber = 6,
   };
   // bytes Key = 1;
   void clear_key();
@@ -678,6 +679,15 @@ class PutAppendArgs PROTOBUF_FINAL :
   void _internal_set_requestid(::PROTOBUF_NAMESPACE_ID::int32 value);
   public:
 
+  // int64 TtlMs = 6;
+  void clear_ttlms();
+  ::PROTOBUF_NAMESPACE_ID::int64 ttlms() const;
+  void set_ttlms(::PROTOBUF_NAMESPACE_ID::int64 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::int64 _internal_ttlms() const;
+  void _internal_set_ttlms(::PROTOBUF_NAMESPACE_ID::int64 value);
+  public:
+
   // @@protoc_insertion_point(class_scope:raftKVRpcProctoc.PutAppendArgs)
  private:
   class _Internal;
@@ -690,6 +700,7 @@ class PutAppendArgs PROTOBUF_FINAL :
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr op_;
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr clientid_;
   ::PROTOBUF_NAMESPACE_ID::int32 requestid_;
+  ::PROTOBUF_NAMESPACE_ID::int64 ttlms_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_kvServerRPC_2eproto;
 };
@@ -1618,6 +1629,26 @@ inline void PutAppendArgs::_internal_set_requestid(::PROTOBUF_NAMESPACE_ID::int3
 inline void PutAppendArgs::set_requestid(::PROTOBUF_NAMESPACE_ID::int32 value) {
   _internal_set_requestid(value);
   // @@protoc_insertion_point(field_set:raftKVRpcProctoc.PutAppendArgs.RequestId)
+}
+
+// int64 TtlMs = 6;
+inline void PutAppendArgs::clear_ttlms() {
+  ttlms_ = PROTOBUF_LONGLONG(0);
+}
+inline ::PROTOBUF_NAMESPACE_ID::int64 PutAppendArgs::_internal_ttlms() const {
+  return ttlms_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::int64 PutAppendArgs::ttlms() const {
+  // @@protoc_insertion_point(field_get:raftKVRpcProctoc.PutAppendArgs.TtlMs)
+  return _internal_ttlms();
+}
+inline void PutAppendArgs::_internal_set_ttlms(::PROTOBUF_NAMESPACE_ID::int64 value) {
+
+  ttlms_ = value;
+}
+inline void PutAppendArgs::set_ttlms(::PROTOBUF_NAMESPACE_ID::int64 value) {
+  _internal_set_ttlms(value);
+  // @@protoc_insertion_point(field_set:raftKVRpcProctoc.PutAppendArgs.TtlMs)
 }
 
 // -------------------------------------------------------------------
