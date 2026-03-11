@@ -61,18 +61,22 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     //，不能直接截断，必须一个一个检查，因为发送来的log可能是之前的，直接截断可能导致“取回”已经在follower日志中的条目
     // 那意思是不是可能会有一段发来的AE中的logs中前半是匹配的，后半是不匹配的，这种应该：1.follower如何处理？ 2.如何给leader回复
     // 3. leader如何处理
-
     for (int i = 0; i < args->entries_size(); i++) {
       auto log = args->entries(i);
       if (log.logindex() > getLastLogIndex()) {
         //超过就直接添加日志
         m_logs.push_back(log);
       } else {
-        //没超过就比较是否匹配，不匹配再更新，而不是直接截断
+        //没超过就比较是否匹配，不匹配再更新，而不是直接截断（暴力覆盖）
         // todo ： 这里可以改进为比较对应logIndex位置的term是否相等，term相等就代表匹配
         //  todo：这个地方放出来会出问题,按理说index相同，term相同，log也应该相同才对
         // rf.logs[entry.Index-firstIndex].Term ?= entry.Term
-
+        //没超过意味着leader发送的日志条目的index小于当前raft日志中最后记录的index。
+        //没超过就比较是否匹配，不匹配再更新而不是直接截断。
+        //这里上面有一个细节首先判断了leader发送过来认为raft已经接收到是prelogindex和任期的值和raft当前节点是否一致，是就继续
+        //else就在下面进行优化rpc请求次数的处理。
+        //这里判断的就是leader新发送的数据的index小于等于日志记录最后的index。不是直接截断而是看leader发送的任期和命令是否和当前raft记录的任期和命令一致，
+        //不一致就更新
         if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() == log.logterm() &&
             m_logs[getSlicesIndexFromLogIndex(log.logindex())].command() != log.command()) {
           //相同位置的log ，其logTerm相等，但是命令却不相同，不符合raft的前向匹配，异常了！
@@ -88,7 +92,6 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
         }
       }
     }
-
     // 错误写法like：  rf.shrinkLogsToIndex(args.PrevLogIndex)
     // rf.logs = append(rf.logs, args.Entries...)
     // 因为可能会收到过期的log！！！ 因此这里是大于等于
@@ -100,18 +103,17 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     //	fmt.Printf("[func-AppendEntries  rf:{%v}] ] : args.term:%v, rf.term:%v  ,rf.logs的长度：%v\n", rf.me, args.Term,
     // rf.currentTerm, len(rf.logs))
     // }
+    //这种情况出现就是当前任期没有提交但是领导之前的日志保存了已经调交的日志信息，所以追随者不能直接无脑上getlastlogindex()
     if (args->leadercommit() > m_commitIndex) {
       m_commitIndex = std::min(args->leadercommit(), getLastLogIndex());
       // 这个地方不能无脑跟上getLastLogIndex()，因为可能存在args->leadercommit()落后于 getLastLogIndex()的情况
     }
-
     // 领导会一次发送完所有的日志
     myAssert(getLastLogIndex() >= m_commitIndex,
              format("[func-AppendEntries1-rf{%d}]  rf.getLastLogIndex{%d} < rf.commitIndex{%d}", m_me,
                     getLastLogIndex(), m_commitIndex));
     reply->set_success(true);
     reply->set_term(m_currentTerm);
-
     //        DPrintf("[func-AppendEntries-rf{%v}] 接收了来自节点{%v}的log，当前lastLogIndex{%v}，返回值：{%v}\n",
     //        rf.me,
     //                args.LeaderId, rf.getLastLogIndex(), reply)
@@ -122,8 +124,11 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     // PrevLogIndex 长度合适，但是不匹配，因此往前寻找 矛盾的term的第一个元素
     // 为什么该term的日志都是矛盾的呢？也不一定都是矛盾的，只是这么优化减少rpc而已
     // ？什么时候term会矛盾呢？很多情况，比如leader接收了日志之后马上就崩溃等等
+    //此时的情况就是领导认为我们应该同步的index和任期在我们的追随者日志中不一致
+    //所以就需要发送期望领导发送日志的index值，这个由接收者去设置期望的index
+    //并且优化请求rpc的次数
+    //注意：如果没出现任期不匹配的情况可能是其他矛盾就不会利用到for循环的优化而是一步步向前匹配。
     reply->set_updatenextindex(args->prevlogindex());
-
     for (int index = args->prevlogindex(); index >= m_lastSnapshotIncludeIndex; --index) {
       if (getLogTermFromLogIndex(index) != getLogTermFromLogIndex(args->prevlogindex())) {
         reply->set_updatenextindex(index + 1);
