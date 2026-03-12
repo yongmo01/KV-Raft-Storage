@@ -492,32 +492,50 @@ cmake -B build -DENABLE_READ_INDEX=OFF -DENABLE_KEY_TTL=OFF \
 ### 构建步骤
 
 ```bash
-# 1. 克隆项目
-git clone <repo-url>
+# 1. 克隆项目 (如果已在原项目中，直接进入目录即可)
+# git clone <repo-url>
 cd KV-Raft-Storage
 
-# 2. 构建（默认开启所有扩展）
+# 2. 构建项目（默认开启所有扩展）
+# 推荐使用 out-of-source 外部构建保持源码目录整洁
 mkdir build && cd build
 cmake ..
+# 开启多核并行编译加速
 make -j$(nproc)
 
-# 3. 可执行文件输出到 bin/
+# 3. 验证可执行文件
+# 编译后的二进制文件及默认配置将会输出到项目根目录的 bin/ 目录
 ls ../bin/
 ```
 
 ### 部署集群
 
+> **⚠️ 关于配置文件的核心说明：** 
+> 程序的运行高度依赖于 `bin/test.conf`，里面记录了所有节点的网络映射（IP地址和端口号等）。**请绝对不要删除它**。无论是服务端还是客户端，都需要读取该配置文件建立 RPC 通信。
+
 ```bash
-# 清理旧配置
-rm -f bin/test.conf
+# 1. 进入产出目录
+cd ../bin
 
-# 启动 3 个 Raft 节点（每个节点一个终端）
-./bin/raftCoreRun -n 3 -i 0 -p 12300 &
-./bin/raftCoreRun -n 3 -i 1 -p 12301 &
-./bin/raftCoreRun -n 3 -i 2 -p 12302 &
+# 2. 检查/修改配置（确保 test.conf 内的 IP 与当前服务器环境匹配）
+# vim test.conf 
 
-# 启动客户端
-./bin/callerRun
+# 3. 启动 3 个 Raft 节点（强烈建议为每个节点开一个独立的终端屏幕，避免日志混淆）
+# 启动命令格式：./raftCoreRun -n <当前节点的ID> -f <配置文件名>
+
+# 终端 1 中运行 Node 0：
+./raftCoreRun -n 0 -f test.conf
+
+# 终端 2 中运行 Node 1：
+./raftCoreRun -n 1 -f test.conf
+
+# 终端 3 中运行 Node 2：
+./raftCoreRun -n 2 -f test.conf
+
+# 4. 启动客户端发出请求
+# 使用 callerMain 或者 consumer （具体看你想测试的基础 RPC 交互还是 RaftKV 交互）
+# 终端 4 中运行客户端：
+./callerMain
 ```
 
 ---
