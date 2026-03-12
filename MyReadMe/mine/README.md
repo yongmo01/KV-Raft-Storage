@@ -17,6 +17,7 @@
 - [文件变更清单](#文件变更清单)
 - [测试与验证](#测试与验证)
 - [性能与资源预估](#性能与资源预估)
+- [更新日志](#更新日志)
 
 ---
 
@@ -511,30 +512,29 @@ ls ../bin/
 ### 部署集群
 
 > **⚠️ 关于配置文件的核心说明：** 
-> 程序的运行高度依赖于 `bin/test.conf`，里面记录了所有节点的网络映射（IP地址和端口号等）。**请绝对不要删除它**。无论是服务端还是客户端，都需要读取该配置文件建立 RPC 通信。
+> 程序内部采用网络与端口的自动分配并写入的方式，在集群**启动时**会自动清空原配置文件 `bin/test.conf` 并重新录入最新分配的网络映射。因此，请确保在运行 `caller.cpp` 等客户端测试的时候与服务端共用该配置文件！
 
 ```bash
-# 1. 进入产出目录
+# 1. 切换到可执行文件目录
 cd ../bin
 
-# 2. 检查/修改配置（确保 test.conf 内的 IP 与当前服务器环境匹配）
-# vim test.conf 
+# 2. 启动包含 3 个节点的 Raft 集群（只需一条命令！）
+# 命令格式：./raftCoreRun -n <总节点数量> -f <写入的配置文件名>
+#
+# 内部运行机制（基于多进程）：
+#   (1) raftCoreRun 首先会自动清空并重置 test.conf（这就是为什么终端会打印 "test.conf 已清空"）
+#   (2) 然后循环 3 次，调用 fork() 产生三个子进程运行 KvServer。
+#   (3) 运行时会自动分配并绑定可用的端口，并追加写入 test.conf 里。
+# 
+# 所以你在一个终端直接运行下述命令即可：
+./raftCoreRun -n 3 -f test.conf
 
-# 3. 启动 3 个 Raft 节点（强烈建议为每个节点开一个独立的终端屏幕，避免日志混淆）
-# 启动命令格式：./raftCoreRun -n <当前节点的ID> -f <配置文件名>
+# 此时你会首先看到 "test.conf 已清空" 的提示，等待子进程初始化完毕后
+# 节点之间便开始发送 RequestVote，能够成功选举出 Leader！
 
-# 终端 1 中运行 Node 0：
-./raftCoreRun -n 0 -f test.conf
-
-# 终端 2 中运行 Node 1：
-./raftCoreRun -n 1 -f test.conf
-
-# 终端 3 中运行 Node 2：
-./raftCoreRun -n 2 -f test.conf
-
-# 4. 启动客户端发出请求
-# 使用 callerMain 或者 consumer （具体看你想测试的基础 RPC 交互还是 RaftKV 交互）
-# 终端 4 中运行客户端：
+# 3. 启动客户端发出请求
+# 请打开另外的一个新终端进入 bin 目录下，启动客户端！
+# 客户端（如 callerMain）在启动时，会读取刚刚由 raftCoreRun 生成的 test.conf 并解析里面的 3 个节点地址进行请求：
 ./callerMain
 ```
 
@@ -706,3 +706,50 @@ cmake -B build -DENABLE_READ_INDEX=OFF -DENABLE_KEY_TTL=OFF \
 3. **优雅降级**：ReadIndex 失败时自动退回到日志复制方案
 4. **一致性优先**：TTL 通过 Raft 日志复制，保证所有节点一致过期
 5. **参考业界实践**：ReadIndex 参考 etcd/TiKV，TTL 参考 Redis，Metrics 参考 Prometheus
+
+---
+
+## 更新日志
+
+### 2026-03-12 Bug 修复：客户端交互后集群崩溃
+
+**问题现象**：启动 3 节点 Raft 集群后，执行 `./callerMain` 与集群交互。客户端能正常完成约 200 次 PutAppend/Get 操作（从 499 到 290），之后 Leader 突然丢失，集群无法选出新的稳定 Leader，所有节点间连接断开，最终进程崩溃。
+
+**错误日志关键行**：
+```
+Error: [func-getSlicesIndexFromLogIndex-rf{1}]  index{210} <= rf.lastSnapshotIncludeIndex{211}
+terminate called after throwing an instance of 'boost::archive::archive_exception'
+  what():  invalid signature
+```
+
+**根因分析**：定位到 **3 个关联 Bug**：
+
+#### Bug 1（致命）：ReadIndex 缺少快照边界检查
+
+- **文件**：`src/raftCore/raft.cpp` — `Raft::ReadIndex()`
+- **原因**：`ReadIndex` 为确认 Leadership 向 Follower 发送心跳时，直接调用 `getPrevLogInfo(i, ...)` 构造 AE 参数，**没有** 像 `doHeartBeat()` 那样先检查 `m_nextIndex[i] <= m_lastSnapshotIncludeIndex`。当日志被快照截断后（例如 `m_lastSnapshotIncludeIndex = 211`），若某个 peer 的 `m_nextIndex` 仍为 211（等于快照索引），`getPrevLogInfo` 会计算 `preIndex = 210`，调用 `getSlicesIndexFromLogIndex(210)` 触发断言 `index > m_lastSnapshotIncludeIndex` 失败，`myAssert` 调用 `std::exit(EXIT_FAILURE)` **导致整个进程崩溃**。
+- **修复**：在 ReadIndex 的心跳线程中，加锁后立即检查 `m_nextIndex[i] <= m_lastSnapshotIncludeIndex`，若成立则跳过该 peer（`finished++` 后 return）。
+
+#### Bug 2（重要）：AppendEntries1 缺少 return 语句
+
+- **文件**：`src/raftCore/raft.cpp` — `Raft::AppendEntries1()`
+- **原因**：`else if (args->prevlogindex() < m_lastSnapshotIncludeIndex)` 分支设置了 reply 但**没有 return**，导致 fall through 到 `matchLog(args->prevlogindex(), args->prevlogterm())`。`matchLog` 内部断言 `logIndex >= m_lastSnapshotIncludeIndex` 会失败，同样调用 `std::exit` 崩溃。这是一个**既有 Bug**（原始代码中已存在，但扩展功能增加了 RPC 频率使其更容易被触发）。
+- **修复**：在该分支末尾添加 `return;`。
+
+#### Bug 3（中等）：线程池未区分 Raft/KV RPC
+
+- **文件**：`src/rpc/rpcprovider.cpp` — `RpcProvider::OnMessage()`
+- **原因**：线程池将**所有** RPC（包括 Raft 心跳/投票和 KV Put/Get）放入同一个 4 线程的线程池。KV 操作（PutAppend/Get）会阻塞线程等待 Raft 共识（最长 500ms），池满时 Raft 心跳 RPC 被延迟处理，导致 Follower 选举超时、Leader 频繁切换。
+- **修复**：通过判断 `service_name == "raftRpc"` 区分服务类型。Raft 内部 RPC 直接在 Muduo IO 线程同步执行（保证低延迟），仅将 KV 业务 RPC 异步卸载到线程池。
+
+#### 附加修复：RPC request/response 内存泄漏
+
+- **文件**：`src/rpc/rpcprovider.cpp`
+- **原因**：`OnMessage` 中通过 `New()` 分配的 `request` 和 `response` 对象从未被释放，每次 RPC 调用都泄漏两个 protobuf Message 对象。长时间运行的集群会逐渐耗尽内存。
+- **修复**：`CallMethod` 返回后 `delete request`；`SendRpcResponse` 发送完毕后 `delete response`。
+
+**修改文件清单**：
+| 文件 | 修改内容 |
+|------|---------|
+| `src/raftCore/raft.cpp` | ReadIndex 增加快照边界检查；AppendEntries1 增加 return |
+| `src/rpc/rpcprovider.cpp` | 线程池区分 Raft/KV RPC；修复 request/response 内存泄漏 |

@@ -235,12 +235,26 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   //真正调用方法
   // 【扩展三】如果启用了线程池，将业务处理卸载到线程池中执行
   //          这样Muduo的IO线程只负责网络收发，不会被耗时的业务逻辑阻塞
+  //
+  // 【BugFix】仅将KV业务RPC（如PutAppend, Get）卸载到线程池。
+  //   Raft内部RPC（AppendEntries, RequestVote, InstallSnapshot）是轻量级操作，
+  //   不应进入线程池排队。否则当线程池被KV操作饱和（等待共识500ms）时，
+  //   Raft心跳/选举RPC会被延迟，导致follower选举超时、集群不稳定。
 #if ENABLE_THREAD_POOL
-  m_businessThreadPool.enqueue([service, method, request, response, done]() {
+  if (service_name == "raftRpc") {
+    // Raft内部RPC（心跳、投票、快照）直接在IO线程同步执行，保证低延迟
     service->CallMethod(method, nullptr, request, response, done);
-  });
+    delete request;  // 【BugFix】修复既有内存泄漏：释放request（response在SendRpcResponse中释放）
+  } else {
+    // KV业务RPC异步卸载到线程池，避免阻塞IO线程
+    m_businessThreadPool.enqueue([service, method, request, response, done]() {
+      service->CallMethod(method, nullptr, request, response, done);
+      delete request;  // 【BugFix】线程池执行完毕后释放request
+    });
+  }
 #else
   service->CallMethod(method, nullptr, request, response, done);
+  delete request;  // 【BugFix】释放request
 #endif
 }
 
@@ -254,6 +268,8 @@ void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr &conn, goog
   } else {
     std::cout << "serialize response_str error!" << std::endl;
   }
+  // 【BugFix】修复既有内存泄漏：发送响应后释放response对象
+  delete response;
   //    conn->shutdown(); // 模拟http的短链接服务，由rpcprovider主动断开连接  //改为长连接，不主动断开
 }
 

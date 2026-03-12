@@ -53,7 +53,10 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     reply->set_term(m_currentTerm);
     reply->set_updatenextindex(m_lastSnapshotIncludeIndex +1);  // todo 如果想直接弄到最新好像不对，因为是从后慢慢往前匹配的，这里不匹配说明后面的都不匹配
     //  DPrintf("[func-AppendEntries-rf{%v}] 拒绝了节点{%v}，因为log太老，返回值：{%v}\n", rf.me, args.LeaderId, reply)
-    //  return
+    // 【BugFix】此处原先缺少 return，导致 prevlogindex < lastSnapshotIncludeIndex 时
+    // 会 fall through 到下方的 matchLog()，matchLog 内部的 myAssert 断言
+    // logIndex >= lastSnapshotIncludeIndex 会失败，触发 std::exit 导致进程崩溃。
+    return;
   }
   //	本机日志有那么长，冲突(same index,different term),截断日志
   // 注意：这里目前当args.PrevLogIndex == rf.lastSnapshotIncludeIndex与不等的时候要分开考虑，可以看看能不能优化这块
@@ -1198,6 +1201,16 @@ bool Raft::ReadIndex(int *readIndex) {
           finished->fetch_add(1);
           return;
         }
+
+        // 【BugFix】快照边界检查：如果该peer的nextIndex已经落后于快照索引，
+        // 说明该peer需要先安装快照才能同步日志。此时无法构造有效的心跳参数，
+        // 直接跳过此peer的ReadIndex确认（不计入confirmCount）。
+        // 这是导致 "index <= lastSnapshotIncludeIndex" 断言失败的根本原因。
+        if (m_nextIndex[i] <= m_lastSnapshotIncludeIndex) {
+          finished->fetch_add(1);
+          return;
+        }
+
         // 构造心跳参数
         args.set_term(m_currentTerm);
         args.set_leaderid(m_me);
