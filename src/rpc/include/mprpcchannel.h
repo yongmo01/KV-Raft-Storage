@@ -32,7 +32,6 @@ class MprpcChannel : public google::protobuf::RpcChannel {
   const std::string m_ip;  //保存ip和端口，如果断了可以尝试重连
   const uint16_t m_port;
   std::mutex m_clientFd_mutex;
-  std::mutex m_clientFd_mutex;
   /// @brief 连接ip和端口,并设置m_clientFd
   /// @param ip ip地址，本机字节序
   /// @param port 端口，本机字节序
