@@ -536,6 +536,26 @@ cd ../bin
 # 请打开另外的一个新终端进入 bin 目录下，启动客户端！
 # 客户端（如 callerMain）在启动时，会读取刚刚由 raftCoreRun 生成的 test.conf 并解析里面的 3 个节点地址进行请求：
 ./callerMain
+
+# 客户端 callerMain 支持丰富的命令行参数，方便进行各种压测控制：
+# 参数说明：
+#   -c <count>      : 向服务器发起的总请求次数 (默认 500)
+#   -o <operation>  : 执行的操作模式。可选值：
+#                     'both' (边写边读，默认)
+#                     'put'  (只疯狂写入进行压测)
+#                     'get'  (只疯狂读取，用于验证 ReadIndex 等)
+#                     'ttl'  (带有 TTL 过期标记的写入)
+#   -k <key>        : 指定操作的 Key 的前缀名 (默认 'x')
+#   -t <ttl_ms>     : 设定带 TTL 模式下的过期毫秒数 (默认 3000ms)
+#   -f <conf_file>  : 读取的集群信息配置文件 (默认 'test.conf')
+# 
+# 使用示例：
+# 1. 模拟慢磁盘阻塞测试（高强度纯 Put 压测）：
+#    ./callerMain -c 50000 -o put
+# 2. 模拟 ReadIndex 高性能纯读性能打流：
+#    ./callerMain -c 50000 -o get -k my_key
+# 3. 模拟小内存下的 TTL 兜底观察测试：
+#    ./callerMain -c 10000 -o ttl -t 5000
 ```
 
 ---
