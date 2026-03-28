@@ -1,4 +1,4 @@
-#include "mprpcchannel.h"
+﻿#include "mprpcchannel.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -18,6 +18,7 @@ header_size + service_name method_name args_size + args
 void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
                               google::protobuf::RpcController* controller, const google::protobuf::Message* request,
                               google::protobuf::Message* response, google::protobuf::Closure* done) {
+  std::lock_guard<std::mutex> lock(m_clientFd_mutex);
   if (m_clientFd == -1) {
     std::string errMsg;
     bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
@@ -147,6 +148,11 @@ bool MprpcChannel::newConnect(const char* ip, uint16_t port, string* errMsg) {
     *errMsg = errtxt;
     return false;
   }
+    struct timeval tv;
+  tv.tv_sec = 0;
+  tv.tv_usec = 500000; // 500ms timeout
+  setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+  setsockopt(clientfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
   m_clientFd = clientfd;
   return true;
 }

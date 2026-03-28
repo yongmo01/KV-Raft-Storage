@@ -1,4 +1,4 @@
-#ifndef MPRPCCHANNEL_H
+﻿#ifndef MPRPCCHANNEL_H
 #define MPRPCCHANNEL_H
 
 #include <google/protobuf/descriptor.h>
@@ -11,6 +11,8 @@
 #include <map>
 #include <random>  // 包含 std::uniform_int_distribution 类型的头文件
 #include <string>
+#include <mutex>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 using namespace std;
@@ -29,6 +31,8 @@ class MprpcChannel : public google::protobuf::RpcChannel {
   int m_clientFd;
   const std::string m_ip;  //保存ip和端口，如果断了可以尝试重连
   const uint16_t m_port;
+  std::mutex m_clientFd_mutex;
+  std::mutex m_clientFd_mutex;
   /// @brief 连接ip和端口,并设置m_clientFd
   /// @param ip ip地址，本机字节序
   /// @param port 端口，本机字节序
@@ -37,3 +41,4 @@ class MprpcChannel : public google::protobuf::RpcChannel {
 };
 
 #endif  // MPRPCCHANNEL_H
+

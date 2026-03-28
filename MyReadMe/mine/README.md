@@ -773,3 +773,18 @@ terminate called after throwing an instance of 'boost::archive::archive_exceptio
 |------|---------|
 | `src/raftCore/raft.cpp` | ReadIndex 增加快照边界检查；AppendEntries1 增加 return |
 | `src/rpc/rpcprovider.cpp` | 线程池区分 Raft/KV RPC；修复 request/response 内存泄漏 |
+
+### 4. 修复 Raft 空载时内存持续泄漏及线程死锁问题 (已修复)
+- **现象**：集群在空载（无客户端连接）状态下，服务端内存依然随时间保持线性下降，最终 OOM。
+- **原因**：底层 RPC 收发通道 MprpcChannel 复用同一个短连接套接字 m_clientFd 且没有加锁同步。Raft doHeartBeat 等函数会高频启动 detached std::thread，这些并发线程同时操作同一个 Socket，造成 TCP 报文发送交错受损，以及接收时响应报文与请求不匹配。导致大量线程永远无法收到正确回复，永久阻塞在同步的 ecv() 调用上（Thread Leak），每个堆积的线程都会浪费几兆栈内存。
+- **修复**：
+  - 在 src/rpc/include/mprpcchannel.h 中为 Channel 增加 std::mutex m_clientFd_mutex。
+  - 在 src/rpc/mprpcchannel.cpp 的 CallMethod 函数入口增加 std::lock_guard<std::mutex> lock(m_clientFd_mutex)，确保同一个 Peer 的 RPC 调用串行化。
+  - 在 
+ewConnect 建立 Socket 后立刻注入 SO_RCVTIMEO 和 SO_SNDTIMEO (500ms) 套接字超时保护，强制让无法收到回复的僵尸线程报错退出并释放资源。
+
+**修改文件清单补充**：
+| 文件 | 修改内容 |
+|------|---------|
+| src/rpc/include/mprpcchannel.h | 引入 mutex 成员以控制 m_clientFd 的单点读写 |
+| src/rpc/mprpcchannel.cpp | 加入 lock_guard 并为 fd 增加 setsockopt 超时选项 |
