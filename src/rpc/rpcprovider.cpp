@@ -39,7 +39,7 @@ void RpcProvider::NotifyService(google::protobuf::Service *service) {
 }
 
 // 启动rpc服务节点，开始提供rpc远程网络调用服务
-void RpcProvider::Run(int nodeIndex, short port) {
+void RpcProvider::Run(int nodeIndex, short port, const std::string &configFileName) {
   /* 因为云服务器将hostname的ip设置为内网ip，所以ip先写死为"127.0.0.1"
   //获取可用ip
   char *ipC;
@@ -61,12 +61,12 @@ void RpcProvider::Run(int nodeIndex, short port) {
   //    {
   //        std::cout << "获取可用端口号失败！" << std::endl;
   //    }
-  //写入文件 "test.conf"
+  // Write the node address into the shared cluster config file.
   std::string node = "node" + std::to_string(nodeIndex);
   std::ofstream outfile;
-  outfile.open("test.conf", std::ios::app);  //打开文件并追加写入
+  outfile.open(configFileName, std::ios::app);
   if (!outfile.is_open()) {
-    std::cout << "打开文件失败！" << std::endl;
+    std::cout << "failed to open config file: " << configFileName << std::endl;
     exit(EXIT_FAILURE);
   }
   outfile << node + "ip=" + ip << std::endl;

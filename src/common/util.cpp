@@ -1,7 +1,9 @@
 #include "util.h"
+
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <iomanip>
 
@@ -12,7 +14,7 @@ void myAssert(bool condition, std::string message) {
   }
 }
 
-std::chrono::_V2::system_clock::time_point now() { return std::chrono::high_resolution_clock::now(); }
+std::chrono::system_clock::time_point now() { return std::chrono::system_clock::now(); }
 
 std::chrono::milliseconds getRandomizedElectionTimeout() {
   std::random_device rd;
@@ -22,9 +24,9 @@ std::chrono::milliseconds getRandomizedElectionTimeout() {
   return std::chrono::milliseconds(dist(rng));
 }
 
-void sleepNMilliseconds(int N) { std::this_thread::sleep_for(std::chrono::milliseconds(N)); };
+void sleepNMilliseconds(int N) { std::this_thread::sleep_for(std::chrono::milliseconds(N)); }
 
-bool getReleasePort(short &port) {
+bool getReleasePort(short& port) {
   short num = 0;
   while (!isReleasePort(port) && num < 30) {
     ++port;
@@ -39,11 +41,15 @@ bool getReleasePort(short &port) {
 
 bool isReleasePort(unsigned short usPort) {
   int s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-  sockaddr_in addr;
+  if (s < 0) {
+    return false;
+  }
+
+  sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(usPort);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  int ret = ::bind(s, (sockaddr *)&addr, sizeof(addr));
+  int ret = ::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
   if (ret != 0) {
     close(s);
     return false;
@@ -52,11 +58,10 @@ bool isReleasePort(unsigned short usPort) {
   return true;
 }
 
-void DPrintf(const char *format, ...) {
+void DPrintf(const char* format, ...) {
   if (Debug) {
-    // 获取当前的日期，然后取日志信息，写入相应的日志文件当中 a+
-    time_t now = time(nullptr);
-    tm *nowtm = localtime(&now);
+    time_t current = time(nullptr);
+    tm* nowtm = localtime(&current);
     va_list args;
     va_start(args, format);
     std::printf("[%d-%d-%d-%d-%d-%d] ", nowtm->tm_year + 1900, nowtm->tm_mon + 1, nowtm->tm_mday, nowtm->tm_hour,

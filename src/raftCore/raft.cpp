@@ -14,7 +14,7 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     reply->set_success(false);
     reply->set_term(m_currentTerm);
     reply->set_updatenextindex(-100);  // 论文中：让领导人可以及时更新自己
-    DPrintf("[func-AppendEntries-rf{%d}] 拒绝了 因为Leader{%d}的term{%v}< rf{%d}.term{%d}\n", m_me, args->leaderid(),
+    DPrintf("[func-AppendEntries-rf{%d}] reject leader{%d}: term{%d}< rf{%d}.term{%d}\n", m_me, args->leaderid(),
             args->term(), m_me, m_currentTerm);
     return;  // 注意从过期的领导人收到消息不要重置选举定时器
   }
@@ -83,12 +83,12 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
         //不一致就更新
         if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() == log.logterm() &&
             m_logs[getSlicesIndexFromLogIndex(log.logindex())].command() != log.command()) {
-          //相同位置的log ，其logTerm相等，但是命令却不相同，不符合raft的前向匹配，异常了！
-          myAssert(false, format("[func-AppendEntries-rf{%d}] 两节点logIndex{%d}和term{%d}相同，但是其command{%d:%d}   "
-                                 " {%d:%d}却不同！！\n",
-                                 m_me, log.logindex(), log.logterm(), m_me,
-                                 m_logs[getSlicesIndexFromLogIndex(log.logindex())].command(), args->leaderid(),
-                                 log.command()));
+          myAssert(false,
+                   format("[func-AppendEntries-rf{%d}] same log index{%d} and term{%d}, but command differs: "
+                          "{%d:%s} {%d:%s}\n",
+                          m_me, log.logindex(), log.logterm(), m_me,
+                          m_logs[getSlicesIndexFromLogIndex(log.logindex())].command().c_str(), args->leaderid(),
+                          log.command().c_str()));
         }
         if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() != log.logterm()) {
           //不匹配就更新
@@ -167,7 +167,7 @@ void Raft::applierTicker() {
     //使用匿名函数是因为传递管道的时候不用拿锁
     // todo:好像必须拿锁，因为不拿锁的话如果调用多次applyLog函数，可能会导致应用的顺序不一样
     if (!applyMsgs.empty()) {
-      DPrintf("[func- Raft::applierTicker()-raft{%d}] 向kvserver報告的applyMsgs長度爲：{%d}", m_me, applyMsgs.size());
+      DPrintf("[Raft::applierTicker-rf{%d}] push apply messages to kvserver, count=%zu", m_me, applyMsgs.size());
     }
     for (auto& message : applyMsgs) {
       applyChan->Push(message);
@@ -778,10 +778,11 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
   // ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
   // todo
   auto start = now();
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 開始", m_me, m_currentTerm, getLastLogIndex());
+  DPrintf("[func-sendRequestVote rf{%d}] send RequestVote to server{%d} start", m_me, server);
   bool ok = m_peers[server]->RequestVote(args.get(), reply.get());//接收其他raft节点的回复，可能会有网络问题导致没有回复，因此要判断ok
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 完畢，耗時:{%d} ms", m_me, m_currentTerm,
-          getLastLogIndex(), now() - start);
+  auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start).count();
+  DPrintf("[func-sendRequestVote rf{%d}] send RequestVote to server{%d} done, elapsed:{%lld} ms", m_me, server,
+          static_cast<long long>(elapsedMs));
 
   if (!ok) {
     return ok;  //不知道为什么不加这个的话如果服务器宕机会出现问题的，通不过2B  todo
@@ -908,7 +909,7 @@ bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendE
     int lastLogIndex = getLastLogIndex();
 
     myAssert(m_nextIndex[server] <= lastLogIndex + 1,
-             format("error msg:rf.nextIndex[%d] > lastLogIndex+1, len(rf.logs) = %d   lastLogIndex{%d} = %d", server,
+             format("error msg:rf.nextIndex[%d] > lastLogIndex+1, len(rf.logs) = %zu   lastLogIndex{%d} = %d", server,
                     m_logs.size(), server, lastLogIndex));
     if (*appendNums >= 1 + m_peers.size() / 2) {//只要有超过半数的节点接收了日志，就可以提交了，
       //两种方法保证幂等性(重复执行，结果不变)，1.赋值为0 	2.上面≥改为==
@@ -969,7 +970,7 @@ void Raft::Start(Op command, int* newLogIndex, int* newLogTerm, bool* isLeader) 
   //       m_mtx.unlock();
   //    });
   if (m_status != Leader) {
-    DPrintf("[func-Start-rf{%d}]  is not leader");
+    DPrintf("[func-Start-rf{%d}] is not leader", m_me);
     *newLogIndex = -1;
     *newLogTerm = -1;
     *isLeader = false;
@@ -985,7 +986,7 @@ void Raft::Start(Op command, int* newLogIndex, int* newLogTerm, bool* isLeader) 
   int lastLogIndex = getLastLogIndex();
 
   // leader应该不停的向各个Follower发送AE来维护心跳和保持日志同步，目前的做法是新的命令来了不会直接执行，而是等待leader的心跳触发
-  DPrintf("[func-Start-rf{%d}]  lastLogIndex:%d,command:%s\n", m_me, lastLogIndex, &command);
+  DPrintf("[func-Start-rf{%d}] lastLogIndex:%d, command:%s\n", m_me, lastLogIndex, command.asString().c_str());
   // rf.timer.Reset(10) //接收到命令后马上给follower发送,改成这样不知为何会出现问题，待修正 todo
   persist();
   *newLogIndex = newLogEntry.logindex();
@@ -1144,10 +1145,10 @@ void Raft::Snapshot(int index, std::string snapshot) {
   // rf.lastApplied = index //lastApplied 和 commit应不应该改变呢？？？ 为什么  不应该改变吧
   m_persister->Save(persistData(), snapshot);
 
-  DPrintf("[SnapShot]Server %d snapshot snapshot index {%d}, term {%d}, loglen {%d}", m_me, index,
+  DPrintf("[SnapShot]Server %d snapshot snapshot index {%d}, term {%d}, loglen {%zu}", m_me, index,
           m_lastSnapshotIncludeTerm, m_logs.size());
   myAssert(m_logs.size() + m_lastSnapshotIncludeIndex == lastLogIndex,
-           format("len(rf.logs){%d} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
+           format("len(rf.logs){%zu} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
                   m_lastSnapshotIncludeIndex, lastLogIndex));
 }
 
@@ -1260,7 +1261,7 @@ bool Raft::ReadIndex(int *readIndex) {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
     if (elapsed > CONSENSUS_TIMEOUT) {
-      DPrintf("[ReadIndex-rf{%d}] ReadIndex超时, 已等待%ldms", m_me, elapsed);
+      DPrintf("[ReadIndex-rf{%d}] ReadIndex timeout, elapsed=%lldms", m_me, static_cast<long long>(elapsed));
       return false;
     }
 
