@@ -15,6 +15,7 @@ option(ENABLE_METRICS      "Enable runtime metrics"                  ON)
 option(ENABLE_LRU_CACHE    "Enable in-memory LRU cache for KV reads" ON)
 option(ENABLE_LSM_TREE     "Use minimal LSM-tree KV engine"          OFF)
 option(ENABLE_DEBUG_LOG    "Enable verbose debug logs"               OFF)
+set(RPC_CLIENT_TIMEOUT_MS "5000" CACHE STRING "RPC client socket send/receive timeout in milliseconds")
 
 # 将功能开关传给编译器；未显式传入时由 config.h 提供默认值。
 if(NOT ENABLE_READ_INDEX)
@@ -41,6 +42,7 @@ endif()
 if(ENABLE_DEBUG_LOG)
   add_compile_definitions(ENABLE_DEBUG_LOG=1)
 endif()
+add_compile_definitions(RPC_CLIENT_TIMEOUT_MS=${RPC_CLIENT_TIMEOUT_MS})
 
 set(CMAKE_CXX_STANDARD 20)
 

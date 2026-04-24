@@ -63,4 +63,5 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG_LOG=OFF -DENABLE_KEY_TTL=ON -
 - `benchMain` 测的是端到端路径：`RPC + Raft + 状态机 + KVEngine`。
 - 当前没有新增 `noop` 协议，因此压测结果不能直接解释为纯 Raft 层性能。
 - 当前 `KvServer` 接入 LSM 时没有把 LSM WAL/Manifest 作为恢复真源，也没有默认启动 LSM 后台 worker。
+- 如果高并发压测出现 `recv error! errno:11`，通常是 RPC 客户端等待响应超时。可以降低 `-j` 并发逐步压测，或用 `-DRPC_CLIENT_TIMEOUT_MS=10000` 增大客户端超时时间。
 - 详细说明以 [MyReadMe/origin/README.md](MyReadMe/origin/README.md) 为准。

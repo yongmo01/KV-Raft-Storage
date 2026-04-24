@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstring>
 #include <string>
 #include "mprpccontroller.h"
 #include "rpcheader.pb.h"
@@ -82,33 +83,47 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
   //    std::cout << "args_str: " << args_str << std::endl;
   //    std::cout << "============================================" << std::endl;
 
-  // 发送rpc请求
-  //失败会重试连接再发送，重试连接失败会直接return
-  while (-1 == send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), 0)) {
-    char errtxt[512] = {0};
-    sprintf(errtxt, "send error! errno:%d", errno);
-    std::cout << "尝试重新连接，对方ip：" << m_ip << " 对方端口" << m_port << std::endl;
+  // 发送 RPC 请求。send 可能只写入部分数据，所以必须循环直到完整发送。
+  size_t sent = 0;
+  while (sent < send_rpc_str.size()) {
+    ssize_t n = send(m_clientFd, send_rpc_str.data() + sent, send_rpc_str.size() - sent, 0);
+    if (n > 0) {
+      sent += static_cast<size_t>(n);
+      continue;
+    }
+    if (n == -1 && errno == EINTR) {
+      continue;
+    }
     close(m_clientFd);
     m_clientFd = -1;
-    std::string errMsg;
-    bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
-    if (!rt) {
-      controller->SetFailed(errMsg);
-      return;
-    }
+    char errtxt[512] = {0};
+    snprintf(errtxt, sizeof(errtxt), "send error! errno:%d", errno);
+    controller->SetFailed(errtxt);
+    return;
   }
   /*
   从时间节点来说，这里将请求发送过去之后rpc服务的提供者就会开始处理，返回的时候就代表着已经返回响应了
   */
 
-  // 接收rpc请求的响应值
-  char recv_buf[1024] = {0};
+  // 接收 RPC 响应。高并发 Raft 提交可能超过 500ms，超时时间由配置控制。
+  char recv_buf[4096] = {0};
   int recv_size = 0;
-  if (-1 == (recv_size = recv(m_clientFd, recv_buf, 1024, 0))) {
+  while (true) {
+    recv_size = recv(m_clientFd, recv_buf, sizeof(recv_buf), 0);
+    if (recv_size > 0) {
+      break;
+    }
+    if (recv_size == -1 && errno == EINTR) {
+      continue;
+    }
     close(m_clientFd);
     m_clientFd = -1;
     char errtxt[512] = {0};
-    sprintf(errtxt, "recv error! errno:%d", errno);
+    if (recv_size == 0) {
+      snprintf(errtxt, sizeof(errtxt), "recv error! peer closed connection");
+    } else {
+      snprintf(errtxt, sizeof(errtxt), "recv error! errno:%d", errno);
+    }
     controller->SetFailed(errtxt);
     return;
   }
@@ -119,7 +134,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
   // (!response->ParseFromString(response_str))
   if (!response->ParseFromArray(recv_buf, recv_size)) {
     char errtxt[1050] = {0};
-    sprintf(errtxt, "parse error! response_str:%s", recv_buf);
+    snprintf(errtxt, sizeof(errtxt), "parse error! response_str:%s", recv_buf);
     controller->SetFailed(errtxt);
     return;
   }
@@ -129,13 +144,13 @@ bool MprpcChannel::newConnect(const char* ip, uint16_t port, string* errMsg) {
   int clientfd = socket(AF_INET, SOCK_STREAM, 0);
   if (-1 == clientfd) {
     char errtxt[512] = {0};
-    sprintf(errtxt, "create socket error! errno:%d", errno);
+    snprintf(errtxt, sizeof(errtxt), "create socket error! errno:%d", errno);
     m_clientFd = -1;
     *errMsg = errtxt;
     return false;
   }
 
-  struct sockaddr_in server_addr;
+  struct sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(port);
   server_addr.sin_addr.s_addr = inet_addr(ip);
@@ -143,14 +158,14 @@ bool MprpcChannel::newConnect(const char* ip, uint16_t port, string* errMsg) {
   if (-1 == connect(clientfd, (struct sockaddr*)&server_addr, sizeof(server_addr))) {
     close(clientfd);
     char errtxt[512] = {0};
-    sprintf(errtxt, "connect fail! errno:%d", errno);
+    snprintf(errtxt, sizeof(errtxt), "connect fail! errno:%d", errno);
     m_clientFd = -1;
     *errMsg = errtxt;
     return false;
   }
-    struct timeval tv;
-  tv.tv_sec = 0;
-  tv.tv_usec = 500000; // 500ms timeout
+  struct timeval tv{};
+  tv.tv_sec = RPC_CLIENT_SOCKET_TIMEOUT_MS / 1000;
+  tv.tv_usec = (RPC_CLIENT_SOCKET_TIMEOUT_MS % 1000) * 1000;
   setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
   setsockopt(clientfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
   m_clientFd = clientfd;

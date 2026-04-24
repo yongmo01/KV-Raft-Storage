@@ -301,3 +301,45 @@ RPC + Raft + 状态机 + KVEngine
 - 当前没有新增 `noop` 协议，因此不能把结果直接解释为纯 Raft 层性能。
 - 当前 LSM 在 `KvServer` 接入路径下仍偏前台 flush，P99 抖动可能和 flush 有关。
 - 当前集群启动方式仍以 `raftCoreRun -n 3` 自动 fork 为主，精确故障注入可以后续再增加单节点启动模式。
+
+## 13. 压测常见问题
+
+### 13.1 `recv error! errno:11`
+
+`errno=11` 通常是 `EAGAIN/EWOULDBLOCK`。在本项目的 RPC 客户端里，它通常表示客户端 socket 在等待响应时超时。
+
+高并发压测时，写请求需要经过：
+
+```text
+客户端 RPC -> leader -> Raft 多数派复制 -> 状态机 apply -> RPC 响应
+```
+
+如果并发较高、机器资源较弱、日志较多或 leader 正在排队，单次请求可能超过客户端 socket 超时时间。此时客户端会关闭连接并重试，服务端日志里会看到大量连接移除和新连接。
+
+当前默认 RPC 客户端超时为 5000ms，可以在构建时调整：
+
+```bash
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_DEBUG_LOG=OFF \
+  -DRPC_CLIENT_TIMEOUT_MS=10000
+make -j"$(nproc)"
+```
+
+排查建议：
+
+1. 先用低并发验证链路：
+
+```bash
+./benchMain -c 10000 -j 1 -o put -m unique -p bench -s 256 -f bench.conf --json
+```
+
+2. 再逐步提高并发：
+
+```bash
+./benchMain -c 20000 -j 4 -o put -m unique -p bench -s 256 -f bench.conf --json
+./benchMain -c 50000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --json
+./benchMain -c 100000 -j 16 -o put -m unique -p bench -s 256 -f bench.conf --json
+```
+
+3. 如果 `-j 32` 仍然超时，不要直接判断是机器问题。它也可能说明当前系统瓶颈在 Raft 提交、状态机串行 apply、RPC 业务线程池或客户端超时设置上。

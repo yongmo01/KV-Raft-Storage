@@ -41,6 +41,10 @@ const int CONSENSUS_TIMEOUT = 500 * debugMul;  // ms
 #define ENABLE_LSM_TREE 0
 #endif
 
+#ifndef RPC_CLIENT_TIMEOUT_MS
+#define RPC_CLIENT_TIMEOUT_MS 5000
+#endif
+
 // TTL 清理参数。
 const int TTL_CLEANUP_INTERVAL_MS = 100;
 const int TTL_CLEANUP_SAMPLE_COUNT = 20;
@@ -53,6 +57,7 @@ const int TTL_CLEANUP_SAMPLE_COUNT = 20;
 
 // RPC 业务线程池大小。
 const int THREAD_POOL_SIZE = 4;
+const int RPC_CLIENT_SOCKET_TIMEOUT_MS = RPC_CLIENT_TIMEOUT_MS;
 
 // Metrics 输出间隔。
 const int METRICS_DUMP_INTERVAL_MS = 10000;
