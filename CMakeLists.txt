@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(KVRaftCpp)
 
-# ====================== Feature Switches ======================
-# Each feature can be switched independently from the CMake command line:
+# ====================== 功能开关 ======================
+# 每个功能都可以在 CMake 命令行中单独切换：
 #   cmake -DENABLE_READ_INDEX=OFF ..
 #   cmake -DENABLE_KEY_TTL=OFF ..
 #   cmake -DENABLE_LRU_CACHE=OFF ..
@@ -14,9 +14,9 @@ option(ENABLE_THREAD_POOL  "Enable RPC worker thread pool"           ON)
 option(ENABLE_METRICS      "Enable runtime metrics"                  ON)
 option(ENABLE_LRU_CACHE    "Enable in-memory LRU cache for KV reads" ON)
 option(ENABLE_LSM_TREE     "Use minimal LSM-tree KV engine"          OFF)
+option(ENABLE_DEBUG_LOG    "Enable verbose debug logs"               OFF)
 
-# Pass feature switches to the compiler. config.h provides defaults when a
-# definition is not set here.
+# 将功能开关传给编译器；未显式传入时由 config.h 提供默认值。
 if(NOT ENABLE_READ_INDEX)
   add_compile_definitions(ENABLE_READ_INDEX=0)
 endif()
@@ -38,9 +38,16 @@ endif()
 if(ENABLE_LSM_TREE)
   add_compile_definitions(ENABLE_LSM_TREE=1)
 endif()
+if(ENABLE_DEBUG_LOG)
+  add_compile_definitions(ENABLE_DEBUG_LOG=1)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_BUILD_TYPE "Debug")
+
+# 性能测试默认使用 Release；仍允许外部通过 -DCMAKE_BUILD_TYPE=Debug 覆盖。
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
 set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)

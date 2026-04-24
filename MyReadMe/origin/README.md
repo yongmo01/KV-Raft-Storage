@@ -1,271 +1,303 @@
-# KV-Raft-Storage 实际实现说明
+# KV-Raft-Storage 使用与测试说明
 
-这份 README 只描述当前仓库里已经实现并能对得上代码的内容，不写理想设计。
+这份文档按当前项目的实际实现编写，重点说明如何编译、运行和做基础性能测试。
 
-## 1. 项目当前实现了什么
+## 1. 项目当前实现
 
-这个项目是一个基于 Raft 的 KV 存储系统，主体是 `Raft + RPC + KV 状态机`。当前仓库里的核心能力如下：
+本项目是一个基于 Raft 的分布式 KV 存储系统，当前主要包含：
 
-- Raft 基本流程：选举、日志复制、快照安装、状态持久化。
-- KV 语义：`Put`、`Get`、`Append`。
-- 重复请求去重：按 `ClientId + RequestId` 去重。
-- ReadIndex 读优化：默认开启。
-- TTL：默认开启，采用“读时惰性过期”；后台主动删除默认关闭，避免绕过 Raft 改状态机。
+- Raft：选举、日志复制、提交、快照安装、持久化。
+- KV 状态机：支持 `Put`、`Get`、`Append`。
+- 请求去重：使用 `ClientId + RequestId` 防止重试导致重复执行。
+- ReadIndex：默认开启，用于优化线性一致读。
+- TTL：默认开启，采用读时惰性过期；后台主动删除默认关闭。
 - 存储引擎抽象：`KVEngine`。
 - 默认存储引擎：`SkipListEngine`。
-- 读缓存：默认开启 `CachedKVEngine + LRUCache`。
-- LSM 最小实现：仓库里已经有 `LSMTreeEngine`，但默认关闭，需要显式打开。
-- Metrics：默认开启。
-- RPC 线程池：默认开启；KV 业务 RPC 可卸载到线程池，Raft 内部 RPC 仍直接执行。
+- LRU 缓存：默认开启，作为 `CachedKVEngine` 装饰器。
+- LSM-tree：已有最小实现，默认关闭，需要构建时显式开启。
+- 压测客户端：`benchMain`，用于并发请求、延迟分位和 QPS 统计。
 
-## 2. 默认功能开关
+当前默认路径是：
 
-顶层 `CMakeLists.txt` 当前默认值如下：
+```text
+KvServer -> CachedKVEngine -> SkipListEngine
+```
 
-- `ENABLE_READ_INDEX=ON`
-- `ENABLE_KEY_TTL=ON`
-- `ENABLE_TTL_ACTIVE_EXPIRE=OFF`
-- `ENABLE_THREAD_POOL=ON`
-- `ENABLE_METRICS=ON`
-- `ENABLE_LRU_CACHE=ON`
-- `ENABLE_LSM_TREE=OFF`
+如果开启 LSM：
 
-也就是说，默认行为是：
+```text
+KvServer -> CachedKVEngine -> LSMTreeEngine
+```
 
-- 读路径走 `ReadIndex`
-- KV 使用 `SkipListEngine`
-- 外面包一层 LRU 缓存
-- TTL 只在读时惰性清理
-- 不默认启用 LSM
+注意：当前 `KvServer` 接入 LSM 时，没有把 LSM 自身 WAL/Manifest 作为恢复真源，也没有默认启动 LSM 后台 worker。系统恢复仍主要依赖 Raft 持久化和 Raft snapshot。
 
-## 3. 运行环境要求
+## 2. 运行环境
 
-这个项目按当前实现，应该在 Linux 环境下编译运行。更准确地说，是面向 `Linux / Ubuntu / WSL2(Ubuntu)` 的工程，不是面向原生 Windows。
+项目面向 Linux / Ubuntu / WSL2(Ubuntu) 环境，不建议在原生 Windows 上直接运行集群。
 
-原因很直接，代码里大量使用了 Linux/POSIX 组件：
+需要依赖：
 
-- `fork`、`pause`、`getopt`
-- `unistd.h`
-- `ucontext`
-- `epoll`
-- `pthread`
-- `arpa/inet.h`、`sys/socket.h`
-- Muduo 网络库
-
-## 4. 构建依赖
-
-需要准备这些依赖：
-
-- CMake 3.22 或更高
+- CMake 3.22 或更高版本
 - 支持 C++20 的编译器
-- Protobuf 开发头文件和链接库
+- Protobuf 开发库
 - Boost.Serialization
 - Muduo
-- `pthread`、`dl`
+- pthread / dl
+- POSIX 运行环境
 
-仓库里已经包含了生成好的 `*.pb.cc / *.pb.h`，所以正常编译不要求你先手动跑 `protoc`。只有当你修改了 `.proto` 文件时，才需要重新生成 Protobuf 代码。
+代码中使用了 `fork`、`pause`、`unistd.h`、`epoll`、`pthread`、Muduo 等 Linux/POSIX 组件。
 
-## 5. 正确的编译方式
+## 3. 功能开关
 
-推荐使用 out-of-source build。
+顶层 `CMakeLists.txt` 提供这些开关：
+
+| 开关 | 默认值 | 说明 |
+|---|---:|---|
+| `ENABLE_READ_INDEX` | `ON` | 开启 ReadIndex 读优化 |
+| `ENABLE_KEY_TTL` | `ON` | 开启 key TTL |
+| `ENABLE_TTL_ACTIVE_EXPIRE` | `OFF` | 只开启非删除式 TTL 观察线程 |
+| `ENABLE_THREAD_POOL` | `ON` | 开启 RPC 业务线程池 |
+| `ENABLE_METRICS` | `ON` | 开启运行指标输出 |
+| `ENABLE_LRU_CACHE` | `ON` | 开启 LRU 读缓存 |
+| `ENABLE_LSM_TREE` | `OFF` | 使用 LSM-tree 存储引擎 |
+| `ENABLE_DEBUG_LOG` | `OFF` | 开启详细调试日志 |
+
+性能测试时建议保持：
+
+```bash
+-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG_LOG=OFF
+```
+
+## 4. 编译
+
+建议使用 out-of-source build。
 
 ```bash
 cd /path/to/KV-Raft-Storage
-
 mkdir -p build
 cd build
-
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j"$(nproc)"
 ```
 
-编译完成后，可执行文件会输出到项目根目录的 `bin/`，因为顶层 CMake 里设置了：
+可执行文件会输出到项目根目录的 `bin/`。
 
-- `EXECUTABLE_OUTPUT_PATH=${PROJECT_SOURCE_DIR}/bin`
+## 5. 推荐测试矩阵
 
-### 可选开关示例
+为了让测试结果可解释，建议按固定矩阵测试，不要把多个变量混在一起。
 
-如果你要切换功能开关，可以这样构建：
+### 5.1 基线组
+
+关闭 TTL、LRU、LSM：
 
 ```bash
 cmake .. \
-  -DENABLE_READ_INDEX=ON \
-  -DENABLE_KEY_TTL=ON \
-  -DENABLE_TTL_ACTIVE_EXPIRE=OFF \
-  -DENABLE_THREAD_POOL=ON \
-  -DENABLE_METRICS=ON \
-  -DENABLE_LRU_CACHE=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_DEBUG_LOG=OFF \
+  -DENABLE_KEY_TTL=OFF \
+  -DENABLE_LRU_CACHE=OFF \
   -DENABLE_LSM_TREE=OFF
-```
-
-如果你想试 LSM：
-
-```bash
-cmake .. -DENABLE_LSM_TREE=ON
 make -j"$(nproc)"
 ```
 
-## 6. 当前可执行目标
+### 5.2 缓存组
 
-根据当前 CMake，主要目标有：
+只开启 LRU：
 
-- `raftCoreRun`：启动 Raft KV 集群
-- `callerMain`：KV 客户端
-- `provider` / `consumer`：RPC 示例
-- `test_server` / `test_scheduler` / `test_iomanager` / `test_hook`：fiber 示例
-- `storage_cache_test`：LRU / CachedKVEngine 测试
-- `storage_lsm_test`：LSMTreeEngine 测试
+```bash
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_DEBUG_LOG=OFF \
+  -DENABLE_KEY_TTL=OFF \
+  -DENABLE_LRU_CACHE=ON \
+  -DENABLE_LSM_TREE=OFF
+make -j"$(nproc)"
+```
 
-## 7. 正确的运行方式
+### 5.3 LSM 组
 
-### 7.1 启动 Raft KV 集群
+只开启 LSM：
 
-先进入 `bin/` 目录再启动，这一点很重要。
+```bash
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_DEBUG_LOG=OFF \
+  -DENABLE_KEY_TTL=OFF \
+  -DENABLE_LRU_CACHE=OFF \
+  -DENABLE_LSM_TREE=ON
+make -j"$(nproc)"
+```
+
+### 5.4 全功能组
+
+开启 TTL、LRU、LSM：
+
+```bash
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_DEBUG_LOG=OFF \
+  -DENABLE_KEY_TTL=ON \
+  -DENABLE_LRU_CACHE=ON \
+  -DENABLE_LSM_TREE=ON
+make -j"$(nproc)"
+```
+
+## 6. 启动集群
+
+进入 `bin/` 目录启动 3 节点集群：
 
 ```bash
 cd /path/to/KV-Raft-Storage/bin
-./raftCoreRun -n 3 -f test.conf
+./raftCoreRun -n 3 -f bench.conf
 ```
 
-这条命令的实际行为是：
+这条命令会：
 
-1. 清空 `test.conf`
-2. 主进程循环 `fork()` 出 3 个子进程
-3. 每个子进程创建一个 `KvServer`
-4. 每个节点启动自己的 RPC 服务
-5. 节点把自己的 `ip/port` 追加写入你通过 `-f` 指定的配置文件
-6. 所有节点再回头读取这个配置文件，建立互联
+1. 清空并重写 `bench.conf`。
+2. 通过 `fork()` 创建 3 个 Raft KV 节点。
+3. 每个节点启动自己的 RPC 服务。
+4. 节点地址写入 `bench.conf`。
+5. 集群内部读取同一份配置文件并建立 Raft RPC 连接。
 
-### 7.2 启动客户端
-
-新开一个终端，也进入 `bin/`，然后启动客户端：
+客户端必须读取同一个配置文件：
 
 ```bash
-cd /path/to/KV-Raft-Storage/bin
-./callerMain -f test.conf
+./callerMain -f bench.conf
 ```
 
-如果你服务端不是写到 `test.conf`，那客户端也必须读取同一个文件名。例如：
+## 7. 普通客户端
+
+`callerMain` 适合做功能验证，不适合做严肃压测。
 
 ```bash
-./raftCoreRun -n 3 -f cluster.conf
-./callerMain -f cluster.conf
+./callerMain -c 1000 -o put -k x -f bench.conf
+./callerMain -c 1000 -o get -k x -f bench.conf
+./callerMain -c 1000 -o both -k x -f bench.conf
+./callerMain -c 100 -o ttl -k session -t 5000 -f bench.conf
 ```
 
-这一点现在已经和代码行为一致：RPC 服务端会把节点地址写入 `-f` 指定的文件，而不是强行写死到 `test.conf`。
+## 8. 压测客户端
 
-## 8. 客户端参数
+`benchMain` 是新增的压测入口，支持并发线程、key 分布、value 大小、读写比例、预热和 JSON 输出。
 
-`callerMain` 当前支持这些参数：
+查看帮助：
 
 ```bash
-./callerMain [options]
-
-  -c <count>      请求次数，默认 500
-  -o <operation>  操作模式：both / put / get / ttl
-  -k <key>        操作的 key，默认 x
-  -t <ttl_ms>     ttl 模式下的过期时间，默认 3000
-  -f <conf_file>  配置文件，默认 test.conf
-  -h              打印帮助
+./benchMain --help
 ```
 
-示例：
+常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `-c <count>` | 总请求数 |
+| `-j <threads>` | 客户端并发线程数 |
+| `-o <op>` | 操作类型：`put/get/append/both/ttl` |
+| `-m <mode>` | key 分布：`hot/unique/range` |
+| `-k <key>` | hot 模式下的 key |
+| `-p <prefix>` | unique/range 模式下的 key 前缀 |
+| `-g <range>` | range 模式下的 key 数量 |
+| `-s <size>` | value 大小，单位字节 |
+| `-r <ratio>` | both 模式下读比例，0-100 |
+| `-t <ttl_ms>` | ttl 模式下的 TTL |
+| `-f <conf>` | 集群配置文件 |
+| `--warmup <N>` | 正式统计前的预热请求数 |
+| `--json` | 输出 JSON |
+
+### 8.1 写入压测
+
+不同 key 写入：
 
 ```bash
-# 混合读写
-./callerMain -c 1000 -o both -k x -f test.conf
-
-# 纯写
-./callerMain -c 1000 -o put -k x -f test.conf
-
-# 纯读
-./callerMain -c 1000 -o get -k x -f test.conf
-
-# TTL 写入
-./callerMain -c 100 -o ttl -k session -t 5000 -f test.conf
+./benchMain -c 100000 -j 32 -o put -m unique -p bench -s 256 -f bench.conf --json
 ```
 
-## 9. 测试方式
+热点 key 写入：
 
-当前仓库已经接入的 CTest 目标主要是存储层测试：
+```bash
+./benchMain -c 100000 -j 32 -o put -m hot -k hot -s 256 -f bench.conf --json
+```
+
+### 8.2 读取压测
+
+先预写热点 key：
+
+```bash
+./callerMain -c 1000 -o put -k readbench -f bench.conf
+```
+
+再压测读：
+
+```bash
+./benchMain -c 100000 -j 32 -o get -m hot -k readbench -f bench.conf --json
+```
+
+### 8.3 混合读写
+
+80% 读，20% 写：
+
+```bash
+./benchMain -c 100000 -j 32 -o both -m range -p mix -g 10000 -r 80 -s 256 -f bench.conf --json
+```
+
+### 8.4 TTL 写入
+
+```bash
+./benchMain -c 50000 -j 16 -o ttl -m unique -p ttl -s 128 -t 5000 -f bench.conf --json
+```
+
+## 9. 存储层单元测试
 
 ```bash
 cd /path/to/KV-Raft-Storage/build
 ctest --output-on-failure
 ```
 
-这会跑：
+当前 CTest 主要覆盖：
 
 - `storage_cache_test`
 - `storage_lsm_test`
 
-如果你只想单独执行它们，也可以直接到 `bin/` 里运行对应可执行文件。
-
-## 10. 当前运行注意事项
-
-### 10.1 必须在 Linux 环境运行
-
-原生 Windows 不是这个工程的目标环境。即便部分头文件能通过，`fork/epoll/ucontext/Muduo` 这条运行链路也不是 Windows 方案。
-
-### 10.2 服务端和客户端要共用同一个配置文件
-
-服务端通过 `-f` 指定写入哪个配置文件，客户端也必须读取同一个文件。
-
-### 10.3 建议从 `bin/` 目录启动
-
-因为配置文件路径是相对当前工作目录处理的。从 `bin/` 启动最直接，服务端和客户端也更容易共用同一份配置。
-
-### 10.4 TTL 后台主动清理默认关闭
-
-这是有意为之。后台线程如果直接删 key，会绕过 Raft 日志复制，破坏状态机确定性。当前默认只保留读时惰性过期。
-
-### 10.5 LSM 不是默认路径
-
-虽然仓库里已经有 `LSMTreeEngine`，但默认还是 `SkipListEngine + LRU`。要体验 LSM，需要构建时显式打开：
+也可以直接运行：
 
 ```bash
-cmake .. -DENABLE_LSM_TREE=ON
-```
-
-## 11. 当前代码检查结论
-
-基于当前仓库代码，结论可以分成两层：
-
-### 已确认的部分
-
-- 存储层新增抽象已经接入：`KVEngine / SkipListEngine / CachedKVEngine / LSMTreeEngine`
-- `Append` 语义已经是“读取旧值后追加”，不再是覆盖写
-- TTL 快照已经进入 `KvServer` 序列化
-- TTL 后台主动删除默认关闭
-- LRU 和 LSM 都有独立测试目标
-
-### 需要你注意的现实边界
-
-- 当前仓库的自动化测试主要覆盖存储层，不等于“整个 Raft 集群所有路径都已被自动化验证”
-- 全量集群运行依赖 Linux 上的 Muduo / Protobuf / Boost / POSIX 环境
-- 如果你修改 `.proto`、Muduo 配置、网络线程模型，应该重新做完整集群联调
-
-## 12. 建议的最小验收流程
-
-如果你想确认“这个项目在你的机器上能不能跑”，建议按下面的顺序验收：
-
-```bash
-# 1. 编译
-cd /path/to/KV-Raft-Storage
-mkdir -p build && cd build
-cmake ..
-make -j"$(nproc)"
-
-# 2. 跑存储层测试
-ctest --output-on-failure
-
-# 3. 起 3 节点集群
-cd ../bin
-./raftCoreRun -n 3 -f test.conf
-
-# 4. 新开终端压测客户端
 cd /path/to/KV-Raft-Storage/bin
-./callerMain -c 1000 -o both -k x -f test.conf
+./storage_cache_test
+./storage_lsm_test
 ```
 
-如果这四步都通过，说明你当前机器上的基础编译链、依赖和集群运行链路是通的。
+## 10. 与 etcd 做基础对比
+
+建议先把本项目和 etcd 做端到端 KV 对比，而不是直接声称是纯 Raft 层对比。
+
+对比维度：
+
+- 3 节点写吞吐
+- 3 节点读吞吐
+- 混合读写吞吐
+- 平均延迟、P95、P99
+- leader 故障恢复时间
+
+本项目当前 `benchMain` 测到的是：
+
+```text
+RPC + Raft + 状态机 + KVEngine
+```
+
+不是纯 Raft。若后续要测纯 Raft 提交路径，需要再增加不修改 KV 状态的 `noop` 操作。
+
+## 11. 测试结果记录模板
+
+| 场景 | 构建 | TTL | LRU | LSM | 操作 | 并发 | value 大小 | QPS | 平均延迟 | P95 | P99 |
+|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| baseline put | Release | 关 | 关 | 关 | put | 32 | 256 |  |  |  |  |
+| cache get | Release | 关 | 开 | 关 | get | 32 | 256 |  |  |  |  |
+| lsm put | Release | 关 | 关 | 开 | put | 32 | 256 |  |  |  |  |
+| full mixed | Release | 开 | 开 | 开 | both | 32 | 256 |  |  |  |  |
+
+## 12. 当前测试边界
+
+- `benchMain` 是端到端压测客户端，不是纯 Raft microbenchmark。
+- 当前没有新增 `noop` 协议，因此不能把结果直接解释为纯 Raft 层性能。
+- 当前 LSM 在 `KvServer` 接入路径下仍偏前台 flush，P99 抖动可能和 flush 有关。
+- 当前集群启动方式仍以 `raftCoreRun -n 3` 自动 fork 为主，精确故障注入可以后续再增加单节点启动模式。

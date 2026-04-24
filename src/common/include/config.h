@@ -1,7 +1,11 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const bool Debug = true;
+#ifndef ENABLE_DEBUG_LOG
+#define ENABLE_DEBUG_LOG 0
+#endif
+
+const bool Debug = ENABLE_DEBUG_LOG;
 
 const int debugMul = 1;
 const int HeartBeatTimeout = 25 * debugMul;
@@ -12,7 +16,7 @@ const int maxRandomizedElectionTime = 500 * debugMul;  // ms
 
 const int CONSENSUS_TIMEOUT = 500 * debugMul;  // ms
 
-// Feature switches. CMake can override these definitions with -D options.
+// 功能开关；CMake 可以通过 -D 参数覆盖这些默认值。
 #ifndef ENABLE_READ_INDEX
 #define ENABLE_READ_INDEX 1
 #endif
@@ -37,32 +41,30 @@ const int CONSENSUS_TIMEOUT = 500 * debugMul;  // ms
 #define ENABLE_LSM_TREE 0
 #endif
 
-// TTL cleanup parameters.
+// TTL 清理参数。
 const int TTL_CLEANUP_INTERVAL_MS = 100;
 const int TTL_CLEANUP_SAMPLE_COUNT = 20;
 
-// Active TTL cleanup is disabled by default because deleting keys from the
-// background thread would bypass Raft log replication. Expired keys are still
-// filtered by read-time lazy expiration.
+// 默认关闭主动过期清理，因为后台线程直接删 key 会绕过 Raft 日志复制。
+// 过期 key 仍会在读路径中按惰性过期规则被过滤。
 #ifndef ENABLE_TTL_ACTIVE_EXPIRE
 #define ENABLE_TTL_ACTIVE_EXPIRE 0
 #endif
 
-// RPC thread-pool size.
+// RPC 业务线程池大小。
 const int THREAD_POOL_SIZE = 4;
 
-// Metrics dump interval.
+// Metrics 输出间隔。
 const int METRICS_DUMP_INTERVAL_MS = 10000;
 
-// KV read cache capacity. The cache is a derived optimization and is not
-// serialized into snapshots.
+// KV 读缓存容量。缓存是派生优化状态，不进入快照。
 const int LRU_CACHE_CAPACITY = 1024;
 
-// Minimal LSM memtable flush threshold, counted by distinct keys in memtable.
+// 最小 LSM memtable flush 阈值，按 memtable 中不同 key 的数量计算。
 const int LSM_MEMTABLE_FLUSH_THRESHOLD = 1024;
 
-// Fiber scheduler parameters.
+// Fiber 调度器参数。
 const int FIBER_THREAD_NUM = 1;
 const bool FIBER_USE_CALLER_THREAD = false;
 
-#endif  // CONFIG_H
+#endif  // CONFIG_H 头文件保护结束

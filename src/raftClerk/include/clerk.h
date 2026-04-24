@@ -1,11 +1,10 @@
-//
-// Created by swx on 23-6-4.
-//
+// Raft KV 客户端封装。
 
 #ifndef SKIP_LIST_ON_RAFT_CLERK_H
 #define SKIP_LIST_ON_RAFT_CLERK_H
 
-#include <cstdlib>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,8 +22,10 @@ class Clerk {
   int m_recentLeaderId;
 
   std::string Uuid() {
-    return std::to_string(std::rand()) + std::to_string(std::rand()) + std::to_string(std::rand()) +
-           std::to_string(std::rand());
+    static std::atomic<unsigned long long> nextId{1};
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto seq = nextId.fetch_add(1, std::memory_order_relaxed);
+    return std::to_string(now) + "_" + std::to_string(seq);
   }
 
   void PutAppend(std::string key, std::string value, std::string op);
@@ -48,4 +49,4 @@ class Clerk {
 #endif
 };
 
-#endif  // SKIP_LIST_ON_RAFT_CLERK_H
+#endif  // SKIP_LIST_ON_RAFT_CLERK_H 头文件保护结束
