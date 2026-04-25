@@ -45,6 +45,10 @@ const int CONSENSUS_TIMEOUT = 500 * debugMul;  // ms
 #define RPC_CLIENT_TIMEOUT_MS 5000
 #endif
 
+#ifndef THREAD_POOL_SIZE
+#define THREAD_POOL_SIZE 4
+#endif
+
 // TTL 清理参数。
 const int TTL_CLEANUP_INTERVAL_MS = 100;
 const int TTL_CLEANUP_SAMPLE_COUNT = 20;
@@ -55,8 +59,8 @@ const int TTL_CLEANUP_SAMPLE_COUNT = 20;
 #define ENABLE_TTL_ACTIVE_EXPIRE 0
 #endif
 
-// RPC 业务线程池大小。
-const int THREAD_POOL_SIZE = 4;
+// RPC 业务线程池大小，可通过 CMake 参数 -DTHREAD_POOL_SIZE=<N> 调整。
+const int RPC_THREAD_POOL_SIZE = THREAD_POOL_SIZE;
 const int RPC_CLIENT_SOCKET_TIMEOUT_MS = RPC_CLIENT_TIMEOUT_MS;
 
 // Metrics 输出间隔。

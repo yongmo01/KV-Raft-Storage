@@ -303,11 +303,11 @@ class ThreadPool {
 
 ### 3.4 线程数配置
 
-默认线程池大小为 `THREAD_POOL_SIZE = 4`（见 `config.h`），可通过编译参数调整。
+默认线程池大小为 `THREAD_POOL_SIZE = 4`，当前通过 CMake 参数传入，并在 `config.h` 中转换为 `RPC_THREAD_POOL_SIZE` 使用。
 
 在 2 核 CPU 的环境下，推荐配置方式：
 - IO 线程数（Muduo `setThreadNum`）：2-4
-- 业务线程池大小：4-8
+- 业务线程池大小：1-2
 
 ---
 
@@ -473,7 +473,7 @@ cmake -B build -DENABLE_READ_INDEX=OFF -DENABLE_KEY_TTL=OFF \
 |------|--------|------|
 | `TTL_CLEANUP_INTERVAL_MS` | 100 | TTL 定期清理间隔（毫秒） |
 | `TTL_CLEANUP_SAMPLE_COUNT` | 20 | 每次清理抽样 Key 数 |
-| `THREAD_POOL_SIZE` | 4 | 业务线程池大小 |
+| `THREAD_POOL_SIZE` | 4 | 业务线程池大小，可通过 `-DTHREAD_POOL_SIZE=<N>` 调整 |
 | `METRICS_DUMP_INTERVAL_MS` | 10000 | Metrics 输出间隔（毫秒） |
 
 ---

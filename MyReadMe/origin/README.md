@@ -62,10 +62,29 @@ KvServer -> CachedKVEngine -> LSMTreeEngine
 | `ENABLE_LSM_TREE` | `OFF` | 使用 LSM-tree 存储引擎 |
 | `ENABLE_DEBUG_LOG` | `OFF` | 开启详细调试日志 |
 
+另外有两个压测相关的可调参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `THREAD_POOL_SIZE` | `4` | 每个 Raft 节点的 RPC 业务线程池大小 |
+| `RPC_CLIENT_TIMEOUT_MS` | `5000` | RPC 客户端 socket 收发超时时间，单位毫秒 |
+
 性能测试时建议保持：
 
 ```bash
 -DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG_LOG=OFF
+```
+
+如果是在 2 vCPU 的低配云服务器上运行 3 节点集群，建议额外加：
+
+```bash
+-DTHREAD_POOL_SIZE=1
+```
+
+或：
+
+```bash
+-DTHREAD_POOL_SIZE=2
 ```
 
 ## 4. 编译
@@ -76,7 +95,7 @@ KvServer -> CachedKVEngine -> LSMTreeEngine
 cd /path/to/KV-Raft-Storage
 mkdir -p build
 cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG_LOG=OFF -DTHREAD_POOL_SIZE=2 -DRPC_CLIENT_TIMEOUT_MS=10000
 make -j"$(nproc)"
 ```
 
@@ -202,20 +221,23 @@ cd /path/to/KV-Raft-Storage/bin
 | `-t <ttl_ms>` | ttl 模式下的 TTL |
 | `-f <conf>` | 集群配置文件 |
 | `--warmup <N>` | 正式统计前的预热请求数 |
+| `--rate <N>` | 全局限速，每秒最多发送 N 个请求；默认 0 表示不限速 |
 | `--json` | 输出 JSON |
+
+`--rate` 控制的是整个 `benchMain` 进程的总发送速率，不是每个线程的速率。例如 `--rate 1000` 表示所有客户端线程合计每秒最多发起约 1000 个请求。限速等待不会计入单次请求延迟统计，但会影响总耗时和最终 QPS。
 
 ### 8.1 写入压测
 
 不同 key 写入：
 
 ```bash
-./benchMain -c 100000 -j 32 -o put -m unique -p bench -s 256 -f bench.conf --json
+./benchMain -c 100000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --rate 1000 --json
 ```
 
 热点 key 写入：
 
 ```bash
-./benchMain -c 100000 -j 32 -o put -m hot -k hot -s 256 -f bench.conf --json
+./benchMain -c 100000 -j 8 -o put -m hot -k hot -s 256 -f bench.conf --rate 1000 --json
 ```
 
 ### 8.2 读取压测
@@ -229,7 +251,7 @@ cd /path/to/KV-Raft-Storage/bin
 再压测读：
 
 ```bash
-./benchMain -c 100000 -j 32 -o get -m hot -k readbench -f bench.conf --json
+./benchMain -c 100000 -j 8 -o get -m hot -k readbench -f bench.conf --rate 1000 --json
 ```
 
 ### 8.3 混合读写
@@ -237,13 +259,13 @@ cd /path/to/KV-Raft-Storage/bin
 80% 读，20% 写：
 
 ```bash
-./benchMain -c 100000 -j 32 -o both -m range -p mix -g 10000 -r 80 -s 256 -f bench.conf --json
+./benchMain -c 100000 -j 8 -o both -m range -p mix -g 10000 -r 80 -s 256 -f bench.conf --rate 1000 --json
 ```
 
 ### 8.4 TTL 写入
 
 ```bash
-./benchMain -c 50000 -j 16 -o ttl -m unique -p ttl -s 128 -t 5000 -f bench.conf --json
+./benchMain -c 50000 -j 4 -o ttl -m unique -p ttl -s 128 -t 5000 -f bench.conf --rate 500 --json
 ```
 
 ## 9. 存储层单元测试
@@ -337,9 +359,9 @@ make -j"$(nproc)"
 2. 再逐步提高并发：
 
 ```bash
-./benchMain -c 20000 -j 4 -o put -m unique -p bench -s 256 -f bench.conf --json
-./benchMain -c 50000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --json
-./benchMain -c 100000 -j 16 -o put -m unique -p bench -s 256 -f bench.conf --json
+./benchMain -c 20000 -j 4 -o put -m unique -p bench -s 256 -f bench.conf --rate 500 --json
+./benchMain -c 50000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --rate 1000 --json
+./benchMain -c 100000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --rate 1500 --json
 ```
 
-3. 如果 `-j 32` 仍然超时，不要直接判断是机器问题。它也可能说明当前系统瓶颈在 Raft 提交、状态机串行 apply、RPC 业务线程池或客户端超时设置上。
+3. 如果提高 `--rate` 后仍然超时，不要直接判断是机器问题。它也可能说明当前系统瓶颈在 Raft 提交、状态机串行 apply、RPC 业务线程池或客户端超时设置上。低配机器上优先固定 `-j 4` 或 `-j 8`，再逐步提高 `--rate`，这样结果更稳定。

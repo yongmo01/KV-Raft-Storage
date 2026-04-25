@@ -28,9 +28,9 @@ class ThreadPool {
  public:
   /**
    * @brief 构造线程池并启动工作线程
-   * @param numThreads 线程数量，默认使用config.h中的THREAD_POOL_SIZE
+   * @param numThreads 线程数量，默认使用 config.h 中的 RPC_THREAD_POOL_SIZE
    */
-  explicit ThreadPool(size_t numThreads = THREAD_POOL_SIZE) : m_stop(false) {
+  explicit ThreadPool(size_t numThreads = RPC_THREAD_POOL_SIZE) : m_stop(false) {
     for (size_t i = 0; i < numThreads; ++i) {
       m_workers.emplace_back([this]() {
         while (true) {

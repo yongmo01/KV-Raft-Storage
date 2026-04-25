@@ -106,6 +106,7 @@ Why new file instead of heavily changing `callerMain`:
 - `-t <ttl_ms>`
 - `-f <conf_file>`
 - `--warmup <N>`
+- `--rate <N>` global request rate limit
 - `--json`
 
 Do not change:

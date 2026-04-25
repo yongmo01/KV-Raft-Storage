@@ -44,6 +44,8 @@ make -j"$(nproc)"
 cd ..
 ```
 
+For low-end 2-vCPU machines, add `-DTHREAD_POOL_SIZE=1` or `-DTHREAD_POOL_SIZE=2` to the CMake command.
+
 ## 2. Current Repository Commands
 
 These work against the current executable naming:
@@ -90,25 +92,25 @@ Recommended benchmark patterns:
 ### Pure write
 
 ```bash
-./bin/benchMain -c 100000 -j 32 -o put -m unique -p bench -s 256 -f bench.conf --json
+./bin/benchMain -c 100000 -j 8 -o put -m unique -p bench -s 256 -f bench.conf --rate 1000 --json
 ```
 
 ### Pure read
 
 ```bash
-./bin/benchMain -c 100000 -j 32 -o get -m hot -k bench -f bench.conf --json
+./bin/benchMain -c 100000 -j 8 -o get -m hot -k bench -f bench.conf --rate 1000 --json
 ```
 
 ### Mixed read/write
 
 ```bash
-./bin/benchMain -c 100000 -j 32 -o both -m range -p mix -r 80 -s 256 -f bench.conf --json
+./bin/benchMain -c 100000 -j 8 -o both -m range -p mix -r 80 -s 256 -f bench.conf --rate 1000 --json
 ```
 
 ### Pure Raft commit path after adding `noop`
 
 ```bash
-./bin/benchMain -c 100000 -j 32 -o noop -m unique -p noop -f bench.conf --json
+./bin/benchMain -c 100000 -j 8 -o noop -m unique -p noop -f bench.conf --rate 1000 --json
 ```
 
 ## 4. etcd Comparison Commands

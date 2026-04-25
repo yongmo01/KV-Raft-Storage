@@ -26,6 +26,7 @@ struct BenchOptions {
   int ttlMs = 3000;
   int warmup = 0;
   int keyRange = 1024;
+  int rateLimit = 0;
   std::string confFile = "test.conf";
   bool json = false;
 };
@@ -57,6 +58,7 @@ void PrintHelp() {
             << "  -t <ttl_ms>      ttl 模式下的 TTL，单位毫秒，默认 3000\n"
             << "  -f <conf_file>   集群配置文件，默认 test.conf\n"
             << "  --warmup <N>     正式统计前的预热请求数，默认 0\n"
+            << "  --rate <N>       全局限速，每秒最多发送 N 个请求，默认 0 表示不限速\n"
             << "  --json           使用 JSON 格式输出结果\n"
             << "  -h, --help       打印帮助\n";
 }
@@ -122,6 +124,7 @@ BenchOptions ParseArgs(int argc, char** argv) {
   static option longOptions[] = {
       {"warmup", required_argument, nullptr, 1000},
       {"json", no_argument, nullptr, 1001},
+      {"rate", required_argument, nullptr, 1002},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -168,6 +171,9 @@ BenchOptions ParseArgs(int argc, char** argv) {
       case 1001:
         options.json = true;
         break;
+      case 1002:
+        options.rateLimit = std::stoi(optarg);
+        break;
       case 'h':
       default:
         PrintHelp();
@@ -192,6 +198,9 @@ BenchOptions ParseArgs(int argc, char** argv) {
   }
   if (options.keyRange <= 0) {
     options.keyRange = 1;
+  }
+  if (options.rateLimit < 0) {
+    options.rateLimit = 0;
   }
   if (!IsValidOperation(options.op)) {
     std::cerr << "不支持的操作类型: " << options.op << std::endl;
@@ -223,11 +232,13 @@ BenchResult RunBenchmark(const BenchOptions& options) {
   std::atomic<long long> nextOp{0};
   std::atomic<long long> success{0};
   std::atomic<long long> failed{0};
+  std::atomic<int> readyWorkers{0};
+  std::atomic<bool> start{false};
   std::vector<std::vector<long long>> threadLatencies(static_cast<size_t>(options.threads));
   std::vector<std::thread> workers;
   workers.reserve(static_cast<size_t>(options.threads));
 
-  const auto begin = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point begin;
   for (int workerId = 0; workerId < options.threads; ++workerId) {
     workers.emplace_back([&, workerId]() {
       Clerk client;
@@ -236,10 +247,20 @@ BenchResult RunBenchmark(const BenchOptions& options) {
       auto& localLatencies = threadLatencies[static_cast<size_t>(workerId)];
       localLatencies.reserve(static_cast<size_t>(options.count / options.threads + 1));
 
+      readyWorkers.fetch_add(1);
+      while (!start.load()) {
+        std::this_thread::yield();
+      }
+
       while (true) {
         const long long opIndex = nextOp.fetch_add(1);
         if (opIndex >= options.count) {
           break;
+        }
+        if (options.rateLimit > 0) {
+          const auto targetDelay =
+              std::chrono::microseconds((opIndex * 1000000LL) / options.rateLimit);
+          std::this_thread::sleep_until(begin + targetDelay);
         }
 
         const auto opBegin = std::chrono::steady_clock::now();
@@ -254,6 +275,12 @@ BenchResult RunBenchmark(const BenchOptions& options) {
       }
     });
   }
+
+  while (readyWorkers.load() < options.threads) {
+    std::this_thread::yield();
+  }
+  begin = std::chrono::steady_clock::now();
+  start.store(true);
 
   for (auto& worker : workers) {
     worker.join();
@@ -290,6 +317,7 @@ void PrintResult(const BenchOptions& options, const BenchResult& result) {
               << "\"operation\":\"" << options.op << "\","
               << "\"key_mode\":\"" << options.keyMode << "\","
               << "\"threads\":" << options.threads << ","
+              << "\"rate_limit\":" << options.rateLimit << ","
               << "\"total\":" << result.total << ","
               << "\"success\":" << result.success << ","
               << "\"failed\":" << result.failed << ","
@@ -306,6 +334,8 @@ void PrintResult(const BenchOptions& options, const BenchResult& result) {
             << "操作类型: " << options.op << "\n"
             << "key 分布: " << options.keyMode << "\n"
             << "并发线程: " << options.threads << "\n"
+            << "限速: "
+            << (options.rateLimit > 0 ? std::to_string(options.rateLimit) + " req/s" : "不限速") << "\n"
             << "总请求数: " << result.total << "\n"
             << "成功请求: " << result.success << "\n"
             << "失败请求: " << result.failed << "\n"

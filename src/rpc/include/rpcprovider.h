@@ -41,7 +41,7 @@ class RpcProvider {
 
   // 【扩展三】业务线程池，用于异步执行RPC业务逻辑，避免阻塞Muduo的IO线程
 #if ENABLE_THREAD_POOL
-  ThreadPool m_businessThreadPool{THREAD_POOL_SIZE};
+  ThreadPool m_businessThreadPool{RPC_THREAD_POOL_SIZE};
 #endif
 
   // 新的socket连接回调
