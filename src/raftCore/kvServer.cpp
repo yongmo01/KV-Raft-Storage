@@ -212,6 +212,8 @@ void KvServer::GetCommandFromRaft(ApplyMsg message) {
       ExecutePutOpOnKVDB(op);
     } else if (op.Operation == "Append") {
       ExecuteAppendOpOnKVDB(op);
+    } else if (op.Operation == "Noop") {
+      // Noop 只用于 Raft 新 leader 推进 commitIndex，不修改 KV 状态机。
     }
   }
 

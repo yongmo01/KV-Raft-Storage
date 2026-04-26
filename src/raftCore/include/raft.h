@@ -76,6 +76,7 @@ class Raft : public raftRpcProctoc::raftRpc {
   void leaderHearBeatTicker();
   void leaderSendSnapShot(int server);
   void leaderUpdateCommitIndex();
+  void appendNoopEntryLocked();
   bool matchLog(int logIndex, int logTerm);
   void persist();
   void RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProctoc::RequestVoteReply* reply);

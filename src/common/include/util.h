@@ -118,7 +118,7 @@ inline uint64_t getCurrentTimeMs() {
 
 class Op {
  public:
-  std::string Operation;  // "Get", "Put", or "Append".
+  std::string Operation;  // 操作类型："Get"、"Put"、"Append" 或 Raft 内部使用的 "Noop"。
   std::string Key;
   std::string Value;
   std::string ClientId;

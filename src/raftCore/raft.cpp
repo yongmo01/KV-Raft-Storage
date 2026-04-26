@@ -834,12 +834,33 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
       m_nextIndex[i] = lastLogIndex + 1;  //有效下标从1开始，因此要+1
       m_matchIndex[i] = 0;                //每换一个领导都是从0开始，见fig2
     }
+    appendNoopEntryLocked();
+    persist();
     std::thread t(&Raft::doHeartBeat, this);  //马上向其他节点宣告自己就是leader
     t.detach();
-
-    persist();
   }
   return true;
+}
+
+void Raft::appendNoopEntryLocked() {
+  // 新 leader 追加当前任期的 Noop 日志，用于推进 commitIndex。
+  // Raft 不能直接提交旧任期日志；当这条当前任期日志被多数派复制后，
+  // 它之前已经存在的日志也会随着 commitIndex 推进而重新 apply 到状态机。
+  Op noop;
+  noop.Operation = "Noop";
+  noop.Key = "";
+  noop.Value = "";
+  noop.ClientId = "__raft_noop__";
+  noop.RequestId = m_currentTerm;
+
+  raftRpcProctoc::LogEntry noopEntry;
+  noopEntry.set_command(noop.asString());
+  noopEntry.set_logterm(m_currentTerm);
+  noopEntry.set_logindex(getNewCommandIndex());
+  m_logs.emplace_back(noopEntry);
+
+  DPrintf("[func-appendNoopEntryLocked-rf{%d}] append noop entry, term=%d, index=%d", m_me, m_currentTerm,
+          noopEntry.logindex());
 }
 
 bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendEntriesArgs> args,
