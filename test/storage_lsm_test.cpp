@@ -1,6 +1,7 @@
 #include "lsm_tree_engine.h"
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -223,6 +224,73 @@ void TestBackgroundWorkerLifecycle() {
   engine.StopBackgroundWorker();
 }
 
+void TestAsyncFlushKeepsFrozenMemTableReadable() {
+  LSMTreeEngine engine(2);
+  std::string value;
+
+  engine.EnableAsyncFlush(true);
+  engine.StartBackgroundWorker(10);
+
+  engine.Put("a", "1");
+  engine.Put("b", "2");
+
+  assert(engine.Get("a", &value));
+  assert(value == "1");
+  assert(engine.Get("b", &value));
+  assert(value == "2");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  engine.StopBackgroundWorker();
+
+  assert(engine.SSTableCount() == 1);
+  assert(engine.Get("a", &value));
+  assert(value == "1");
+  assert(engine.Get("b", &value));
+  assert(value == "2");
+}
+
+void TestConcurrentReadWriteSmoke() {
+  LSMTreeEngine engine(8);
+  std::string value;
+  std::atomic<bool> done{false};
+
+  engine.EnableAsyncFlush(true);
+  engine.StartBackgroundWorker(5);
+
+  for (int i = 0; i < 16; ++i) {
+    engine.Put("seed" + std::to_string(i), "v" + std::to_string(i));
+  }
+
+  std::vector<std::thread> readers;
+  for (int reader = 0; reader < 4; ++reader) {
+    readers.emplace_back([&engine, &done]() {
+      std::string localValue;
+      while (!done.load()) {
+        for (int i = 0; i < 16; ++i) {
+          bool exists = engine.Get("seed" + std::to_string(i), &localValue);
+          assert(exists);
+        }
+      }
+    });
+  }
+
+  for (int i = 0; i < 100; ++i) {
+    engine.Put("write" + std::to_string(i), "value" + std::to_string(i));
+    if (i % 3 == 0) {
+      engine.Delete("deleted" + std::to_string(i));
+    }
+  }
+
+  done.store(true);
+  for (auto& reader : readers) {
+    reader.join();
+  }
+  engine.StopBackgroundWorker();
+
+  assert(engine.Get("write99", &value));
+  assert(value == "value99");
+}
+
 int main() {
   TestPutGetAndFlush();
   TestNewestValueWinsAcrossSSTables();
@@ -235,5 +303,7 @@ int main() {
   TestBlockIndexLookup();
   TestRangeScan();
   TestBackgroundWorkerLifecycle();
+  TestAsyncFlushKeepsFrozenMemTableReadable();
+  TestConcurrentReadWriteSmoke();
   return 0;
 }

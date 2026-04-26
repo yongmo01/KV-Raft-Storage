@@ -2,6 +2,7 @@
 #define KV_RAFT_STORAGE_LSM_TREE_ENGINE_H
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -41,7 +43,7 @@ class LSMTreeEngine : public KVEngine {
   ~LSMTreeEngine() override { StopBackgroundWorker(); }
 
   bool Get(const std::string& key, std::string* value) override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     Entry entry;
     if (FindEntryLocked(key, &entry)) {
       if (entry.type == EntryType::Delete) {
@@ -54,21 +56,21 @@ class LSMTreeEngine : public KVEngine {
   }
 
   void Put(const std::string& key, const std::string& value) override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     AppendWALLocked(EntryType::Put, key, value);
     m_memTable[key] = Entry{EntryType::Put, value};
     FlushMemTableIfNeededLocked();
   }
 
   void Delete(const std::string& key) override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     AppendWALLocked(EntryType::Delete, key, "");
     m_memTable[key] = Entry{EntryType::Delete, ""};
     FlushMemTableIfNeededLocked();
   }
 
   std::string Snapshot() override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     auto data = ExportVisibleDataLocked();
     std::string snapshot;
     WriteUint64(&snapshot, static_cast<uint64_t>(data.size()));
@@ -82,7 +84,7 @@ class LSMTreeEngine : public KVEngine {
   void Restore(const std::string& snapshot) override {
     std::map<std::string, Entry> restored;
     if (snapshot.empty()) {
-      std::lock_guard<std::mutex> lock(m_mtx);
+      std::unique_lock<std::shared_mutex> lock(m_mtx);
       DeleteSSTableFilesLocked();
       m_memTable.clear();
       m_immutableMemTables.clear();
@@ -103,7 +105,7 @@ class LSMTreeEngine : public KVEngine {
       throw std::runtime_error("LSM snapshot has trailing bytes");
     }
 
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     DeleteSSTableFilesLocked();
     m_memTable = std::move(restored);
     m_immutableMemTables.clear();
@@ -114,35 +116,35 @@ class LSMTreeEngine : public KVEngine {
   }
 
   int Size() const override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     return static_cast<int>(ExportVisibleDataLocked().size());
   }
 
   void Display() const override {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     for (const auto& item : ExportVisibleDataLocked()) {
       std::cout << item.first << ":" << item.second << std::endl;
     }
   }
 
   void Flush() {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     FlushMemTableLocked();
   }
 
   void Compact() {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     CompactSSTablesLocked();
   }
 
   std::size_t SSTableCount() const {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     return m_sstables.size();
   }
 
   std::vector<std::pair<std::string, std::string>> RangeScan(const std::string& startKey,
                                                              const std::string& endKey) const {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
     std::vector<std::pair<std::string, std::string>> result;
     if (startKey > endKey) {
       return result;
@@ -167,6 +169,11 @@ class LSMTreeEngine : public KVEngine {
     m_backgroundWorker = std::thread(&LSMTreeEngine::BackgroundWorkerLoop, this, intervalMs <= 0 ? 1000 : intervalMs);
   }
 
+  void EnableAsyncFlush(bool enabled = true) {
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
+    m_asyncFlushEnabled = enabled;
+  }
+
   void StopBackgroundWorker() {
     {
       std::lock_guard<std::mutex> lock(m_workerMtx);
@@ -175,6 +182,7 @@ class LSMTreeEngine : public KVEngine {
       }
       m_backgroundStop = true;
     }
+    m_workerCv.notify_one();
 
     if (m_backgroundWorker.joinable()) {
       m_backgroundWorker.join();
@@ -328,25 +336,42 @@ class LSMTreeEngine : public KVEngine {
 
   void FlushMemTableIfNeededLocked() {
     if (m_memTable.size() >= m_memTableFlushThreshold) {
-      FlushMemTableLocked();
+      if (m_asyncFlushEnabled) {
+        RotateMemTableToImmutableLocked();
+        NotifyBackgroundWorker();
+      } else {
+        FlushMemTableLocked();
+      }
     }
   }
 
   void FlushMemTableLocked() {
+    RotateMemTableToImmutableLocked();
+    FlushImmutableMemTablesLocked();
+  }
+
+  void RotateMemTableToImmutableLocked() {
     if (m_memTable.empty()) {
       return;
     }
     m_immutableMemTables.push_back(std::move(m_memTable));
     m_memTable.clear();
+  }
 
-    SSTable table;
-    table.sequence = ++m_nextSSTableSequence;
-    table.entries = std::move(m_immutableMemTables.back());
-    RebuildSSTableMetadata(&table);
-    PersistSSTableLocked(&table);
-    m_immutableMemTables.pop_back();
-    m_sstables.push_back(std::move(table));
-    RewriteManifestLocked();
+  void FlushImmutableMemTablesLocked() {
+    while (!m_immutableMemTables.empty()) {
+      // 必须按从旧到新的顺序刷盘，避免旧的 immutable memtable 留在内存中覆盖更新的 SSTable。
+      auto entries = std::move(m_immutableMemTables.front());
+      m_immutableMemTables.erase(m_immutableMemTables.begin());
+
+      SSTable table;
+      table.sequence = ++m_nextSSTableSequence;
+      table.entries = std::move(entries);
+      RebuildSSTableMetadata(&table);
+      PersistSSTableLocked(&table);
+      m_sstables.push_back(std::move(table));
+      RewriteManifestLocked();
+    }
   }
 
   void CompactSSTablesLocked() {
@@ -546,25 +571,34 @@ class LSMTreeEngine : public KVEngine {
     }
   }
 
+  void NotifyBackgroundWorker() {
+    {
+      std::lock_guard<std::mutex> lock(m_workerMtx);
+      m_backgroundWorkPending = true;
+    }
+    m_workerCv.notify_one();
+  }
+
   void BackgroundWorkerLoop(int intervalMs) {
     while (true) {
       {
-        std::lock_guard<std::mutex> lock(m_workerMtx);
+        std::unique_lock<std::mutex> lock(m_workerMtx);
+        m_workerCv.wait_for(lock, std::chrono::milliseconds(intervalMs),
+                            [this]() { return m_backgroundStop || m_backgroundWorkPending; });
         if (m_backgroundStop) {
           break;
         }
+        m_backgroundWorkPending = false;
       }
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
-
-      std::lock_guard<std::mutex> lock(m_mtx);
+      std::unique_lock<std::shared_mutex> lock(m_mtx);
       FlushMemTableLocked();
       if (m_sstables.size() > 1) {
         CompactSSTablesLocked();
       }
     }
 
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     FlushMemTableLocked();
     if (m_sstables.size() > 1) {
       CompactSSTablesLocked();
@@ -729,14 +763,17 @@ class LSMTreeEngine : public KVEngine {
   uint64_t m_nextSSTableSequence = 0;
   std::string m_walPath;
   std::string m_manifestPath;
-  mutable std::mutex m_mtx;
+  mutable std::shared_mutex m_mtx;
+  bool m_asyncFlushEnabled = false;
   std::map<std::string, Entry> m_memTable;
   std::vector<std::map<std::string, Entry>> m_immutableMemTables;
   std::vector<SSTable> m_sstables;
   std::mutex m_workerMtx;
+  std::condition_variable m_workerCv;
   std::thread m_backgroundWorker;
   bool m_backgroundStop = false;
   bool m_backgroundRunning = false;
+  bool m_backgroundWorkPending = false;
 };
 
 #endif  // KV_RAFT_STORAGE_LSM_TREE_ENGINE_H

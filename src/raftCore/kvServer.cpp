@@ -23,9 +23,15 @@ namespace {
 
 std::unique_ptr<KVEngine> CreateDefaultKVEngine() {
 #if ENABLE_LSM_TREE
-  auto base = std::make_unique<LSMTreeEngine>(LSM_MEMTABLE_FLUSH_THRESHOLD);
+  auto lsm = std::make_unique<LSMTreeEngine>(LSM_MEMTABLE_FLUSH_THRESHOLD);
+#if ENABLE_LSM_ASYNC_FLUSH
+  // Raft 写入路径必须按日志顺序提交，但 LSM flush 可以后台化，避免当前写请求承担 SSTable 落盘成本。
+  lsm->EnableAsyncFlush(true);
+  lsm->StartBackgroundWorker(LSM_BACKGROUND_FLUSH_INTERVAL_MS);
+#endif
+  std::unique_ptr<KVEngine> base = std::move(lsm);
 #else
-  auto base = std::make_unique<SkipListEngine>(6);
+  std::unique_ptr<KVEngine> base = std::make_unique<SkipListEngine>(6);
 #endif
 #if ENABLE_LRU_CACHE
   return std::make_unique<CachedKVEngine>(std::move(base), LRU_CACHE_CAPACITY);
@@ -50,14 +56,14 @@ void KvServer::DprintfKVDB() {
   if (!Debug) {
     return;
   }
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::shared_lock<std::shared_mutex> lg(m_stateMtx);
   if (m_engine != nullptr) {
     m_engine->Display();
   }
 }
 
 void KvServer::ExecuteAppendOpOnKVDB(Op op) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::unique_lock<std::shared_mutex> lg(m_stateMtx);
 
 #if ENABLE_KEY_TTL
   if (isKeyExpired(op.Key)) {
@@ -81,7 +87,7 @@ void KvServer::ExecuteAppendOpOnKVDB(Op op) {
 }
 
 void KvServer::ExecuteGetOpOnKVDB(Op op, std::string* value, bool* exist) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::unique_lock<std::shared_mutex> lg(m_stateMtx);
   *value = "";
   *exist = false;
 
@@ -101,8 +107,26 @@ void KvServer::ExecuteGetOpOnKVDB(Op op, std::string* value, bool* exist) {
   m_lastRequestId[op.ClientId] = op.RequestId;
 }
 
+void KvServer::ExecuteReadOnlyGetOpOnKVDB(Op op, std::string* value, bool* exist) {
+  std::shared_lock<std::shared_mutex> lg(m_stateMtx);
+  *value = "";
+  *exist = false;
+
+#if ENABLE_KEY_TTL
+  if (isKeyExpired(op.Key)) {
+    // ReadIndex 读请求只判断逻辑可见性，不在共享锁下做物理删除。
+    // 这样可以保证多个读请求并发，同时不会让读路径改变 Raft 状态机。
+    return;
+  }
+#endif
+
+  if (m_engine->Get(op.Key, value)) {
+    *exist = true;
+  }
+}
+
 void KvServer::ExecutePutOpOnKVDB(Op op) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::unique_lock<std::shared_mutex> lg(m_stateMtx);
   m_engine->Put(op.Key, op.Value);
 
 #if ENABLE_KEY_TTL
@@ -136,7 +160,7 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs* args, raftKVRpcProctoc::GetR
     if (m_raftNode->WaitForApplied(readIndex, CONSENSUS_TIMEOUT)) {
       std::string value;
       bool exist = false;
-      ExecuteGetOpOnKVDB(op, &value, &exist);
+      ExecuteReadOnlyGetOpOnKVDB(op, &value, &exist);
       FillGetReply(reply, exist, value);
       DPrintf("[KvServer::Get-ReadIndex] server{%d} readIndex=%d key=%s", m_me, readIndex, op.Key.c_str());
       return;
@@ -156,7 +180,7 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs* args, raftKVRpcProctoc::GetR
 
   LockQueue<Op>* chForRaftIndex = nullptr;
   {
-    std::lock_guard<std::mutex> lg(m_mtx);
+    std::lock_guard<std::mutex> lg(m_waitApplyMtx);
     if (waitApplyCh.find(raftIndex) == waitApplyCh.end()) {
       waitApplyCh.insert(std::make_pair(raftIndex, new LockQueue<Op>()));
     }
@@ -187,7 +211,7 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs* args, raftKVRpcProctoc::GetR
   }
 
   {
-    std::lock_guard<std::mutex> lg(m_mtx);
+    std::lock_guard<std::mutex> lg(m_waitApplyMtx);
     auto it = waitApplyCh.find(raftIndex);
     if (it != waitApplyCh.end()) {
       delete it->second;
@@ -225,7 +249,7 @@ void KvServer::GetCommandFromRaft(ApplyMsg message) {
 }
 
 bool KvServer::ifRequestDuplicate(std::string ClientId, int RequestId) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::shared_lock<std::shared_mutex> lg(m_stateMtx);
   auto it = m_lastRequestId.find(ClientId);
   if (it == m_lastRequestId.end()) {
     return false;
@@ -270,7 +294,7 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs* args, raftKVRpcP
 
   LockQueue<Op>* chForRaftIndex = nullptr;
   {
-    std::lock_guard<std::mutex> lg(m_mtx);
+    std::lock_guard<std::mutex> lg(m_waitApplyMtx);
     if (waitApplyCh.find(raftIndex) == waitApplyCh.end()) {
       waitApplyCh.insert(std::make_pair(raftIndex, new LockQueue<Op>()));
     }
@@ -291,7 +315,7 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs* args, raftKVRpcP
   }
 
   {
-    std::lock_guard<std::mutex> lg(m_mtx);
+    std::lock_guard<std::mutex> lg(m_waitApplyMtx);
     auto it = waitApplyCh.find(raftIndex);
     if (it != waitApplyCh.end()) {
       delete it->second;
@@ -322,7 +346,7 @@ void KvServer::ReadSnapShotToInstall(std::string snapshot) {
 }
 
 bool KvServer::SendMessageToWaitChan(const Op& op, int raftIndex) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::lock_guard<std::mutex> lg(m_waitApplyMtx);
   auto it = waitApplyCh.find(raftIndex);
   if (it == waitApplyCh.end()) {
     return false;
@@ -346,7 +370,7 @@ void KvServer::IfNeedToSendSnapShotCommand(int raftIndex, int proportion) {
 }
 
 void KvServer::GetSnapShotFromRaft(ApplyMsg message) {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::unique_lock<std::shared_mutex> lg(m_stateMtx);
 
   if (m_raftNode->CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot)) {
     ReadSnapShotToInstall(message.Snapshot);
@@ -355,7 +379,7 @@ void KvServer::GetSnapShotFromRaft(ApplyMsg message) {
 }
 
 std::string KvServer::MakeSnapShot() {
-  std::lock_guard<std::mutex> lg(m_mtx);
+  std::unique_lock<std::shared_mutex> lg(m_stateMtx);
   return getSnapshotData();
 }
 
@@ -470,7 +494,7 @@ void KvServer::setKeyExpire(const std::string& key, int64_t expireAtMs) {
 void KvServer::activeExpireCycle() {
   while (true) {
     sleepNMilliseconds(TTL_CLEANUP_INTERVAL_MS);
-    std::lock_guard<std::mutex> lg(m_mtx);
+    std::shared_lock<std::shared_mutex> lg(m_stateMtx);
 
     int sampled = 0;
     int expired = 0;

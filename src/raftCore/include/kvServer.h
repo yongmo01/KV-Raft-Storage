@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -23,7 +24,12 @@
 
 class KvServer : public raftKVRpcProctoc::kvServerRpc {
  private:
-  std::mutex m_mtx;
+  // 状态机读写锁：保护 m_engine、m_lastRequestId 和 TTL 元数据。
+  // ReadIndex 只读请求使用共享锁；Put/Append/快照恢复使用独占锁。
+  mutable std::shared_mutex m_stateMtx;
+
+  // waitApplyCh 只负责 RPC 等待 apply 的通知通道，和 KV 状态机数据拆开加锁。
+  std::mutex m_waitApplyMtx;
   int m_me;
   std::shared_ptr<Raft> m_raftNode;
   std::shared_ptr<LockQueue<ApplyMsg>> applyChan;
@@ -52,6 +58,8 @@ class KvServer : public raftKVRpcProctoc::kvServerRpc {
   void ExecuteAppendOpOnKVDB(Op op);
 
   void ExecuteGetOpOnKVDB(Op op, std::string* value, bool* exist);
+
+  void ExecuteReadOnlyGetOpOnKVDB(Op op, std::string* value, bool* exist);
 
   void ExecutePutOpOnKVDB(Op op);
 
@@ -107,6 +115,7 @@ class KvServer : public raftKVRpcProctoc::kvServerRpc {
   }
 
   std::string getSnapshotData() {
+    // 调用方必须持有 m_stateMtx 的独占锁，避免快照过程中状态机被写入或恢复。
     m_serializedKVData = m_engine->Snapshot();
     std::stringstream ss;
     boost::archive::text_oarchive oa(ss);
@@ -116,6 +125,7 @@ class KvServer : public raftKVRpcProctoc::kvServerRpc {
   }
 
   void parseFromString(const std::string& str) {
+    // 调用方必须持有 m_stateMtx 的独占锁，避免恢复快照时和读写请求并发访问状态机。
     std::stringstream ss(str);
     boost::archive::text_iarchive ia(ss);
     ia >> *this;

@@ -41,6 +41,10 @@ const int CONSENSUS_TIMEOUT = 500 * debugMul;  // ms
 #define ENABLE_LSM_TREE 0
 #endif
 
+#ifndef ENABLE_LSM_ASYNC_FLUSH
+#define ENABLE_LSM_ASYNC_FLUSH 1
+#endif
+
 #ifndef RPC_CLIENT_TIMEOUT_MS
 #define RPC_CLIENT_TIMEOUT_MS 5000
 #endif
@@ -71,6 +75,7 @@ const int LRU_CACHE_CAPACITY = 1024;
 
 // 最小 LSM memtable flush 阈值，按 memtable 中不同 key 的数量计算。
 const int LSM_MEMTABLE_FLUSH_THRESHOLD = 1024;
+const int LSM_BACKGROUND_FLUSH_INTERVAL_MS = 100;
 
 // Fiber 调度器参数。
 const int FIBER_THREAD_NUM = 1;
